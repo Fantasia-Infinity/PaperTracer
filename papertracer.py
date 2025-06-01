@@ -848,8 +848,8 @@ sample_link = "https://scholar.google.com/scholar?cites=11002616430871081935&as_
 def main():
     """主函数"""
     crawler = GoogleScholarCrawler(
-        max_depth=3,  # 最大递归深度
-        max_papers_per_level=5,  # 每层最多爬取的论文数
+        max_depth=10,  # 最大递归深度
+        max_papers_per_level=30,  # 每层最多爬取的论文数
         delay_range=(1, 3)  # 请求间隔时间范围（秒）
     )
     
