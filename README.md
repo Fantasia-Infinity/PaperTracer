@@ -10,9 +10,11 @@ PaperTracer 是一个强大的Google Scholar引用关系爬虫工具，可以递
 - 🔍 **智能解析**: 自动解析论文标题、作者、年份、引用次数等信息
 - 🌳 **树形结构**: 构建清晰的引用关系树，支持多层递归
 - 💾 **数据导出**: 支持JSON格式导出，便于后续分析
+- 🌐 **交互式可视化**: 生成交互式HTML页面，支持鼠标悬停、点击访问等功能
+- 📊 **多种可视化**: 支持静态图表和动态HTML两种可视化方式
 - 🛡️ **反爬保护**: 内置随机延迟和User-Agent轮换机制
 - ⚙️ **灵活配置**: 可自定义爬取深度、每层论文数量等参数
-- 📊 **详细统计**: 提供爬取结果的详细统计信息
+- 📈 **详细统计**: 提供爬取结果的详细统计信息
 
 ## 🚀 快速开始
 
@@ -26,10 +28,14 @@ pip install -r requirements.txt
 
 ```bash
 # 运行完整演示（推荐首次使用）
-python demo.py --demo
+python demo.py
 
 # 查看帮助信息
 python demo.py --help
+
+# 使用不同配置
+python demo.py --config production --depth 3
+python demo.py --config quick --no-visualization
 ```
 
 ### 3. 基本使用
@@ -189,6 +195,29 @@ python visualize_tree.py output/demo_20250601_143052_citation_tree.json --type s
 # 指定输出路径
 python visualize_tree.py output/demo_20250601_143052_citation_tree.json --output output/my_visualization
 ```
+
+### 交互式HTML可视化
+
+```bash
+# 创建交互式HTML可视化
+python html_visualizer.py output/demo_20250601_143052_citation_tree.json --output output/interactive.html
+
+# 使用浏览器打开生成的HTML文件
+open output/interactive.html  # macOS
+# 或
+start output/interactive.html  # Windows
+# 或
+xdg-open output/interactive.html  # Linux
+```
+
+**HTML可视化功能特性:**
+- 🖱️ 鼠标悬停显示论文详细信息（标题、作者、年份、引用次数、摘要）
+- 🔗 点击节点访问论文原始链接
+- 🎛️ 支持树形和力导向两种布局模式
+- 🔍 支持缩放和拖拽操作
+- 📊 显示实时统计信息和深度图例
+- 🎨 美观的现代化界面设计
+- 📱 响应式布局，支持不同屏幕尺寸
 
 ## ⚠️ 注意事项
 
