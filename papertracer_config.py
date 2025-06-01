@@ -44,17 +44,36 @@ class Config:
             return f"{prefix}_{timestamp}.{extension.lstrip('.')}"
     
     @classmethod
-    def get_output_path(cls, filename):
-        """Get full path for output file"""
-        return os.path.join(cls.OUTPUT_DIR, filename)
+    def get_timestamped_dirname(cls, prefix=None):
+        """Generate timestamped directory name"""
+        if prefix is None:
+            prefix = cls.DEFAULT_FILE_PREFIX
+        
+        timestamp = datetime.now().strftime(cls.TIMESTAMP_FORMAT)
+        return f"{prefix}_{timestamp}"
     
     @classmethod
-    def ensure_output_directory(cls):
+    def get_output_path(cls, filename, session_dir=None):
+        """Get full path for output file"""
+        if session_dir:
+            return os.path.join(cls.OUTPUT_DIR, session_dir, filename)
+        else:
+            return os.path.join(cls.OUTPUT_DIR, filename)
+    
+    @classmethod
+    def ensure_output_directory(cls, session_dir=None):
         """Ensure output directory exists"""
-        if not os.path.exists(cls.OUTPUT_DIR):
-            os.makedirs(cls.OUTPUT_DIR)
-            return True
-        return False
+        if session_dir:
+            full_path = os.path.join(cls.OUTPUT_DIR, session_dir)
+            if not os.path.exists(full_path):
+                os.makedirs(full_path)
+                return True
+            return False
+        else:
+            if not os.path.exists(cls.OUTPUT_DIR):
+                os.makedirs(cls.OUTPUT_DIR)
+                return True
+            return False
     
     @classmethod
     def get_all_output_patterns(cls):

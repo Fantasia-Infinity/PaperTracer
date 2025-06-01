@@ -9,10 +9,11 @@ Choose your language / 选择语言:
 
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Enhanced](https://img.shields.io/badge/Enhanced-v2.0-green.svg)](ENHANCED_FEATURES.md)
 
-PaperTracer is a powerful Google Scholar citation crawler that recursively crawls academic paper citation networks and builds tree data structures.
+PaperTracer is a powerful Google Scholar citation crawler that recursively crawls academic paper citation networks and builds tree data structures. **Now with enhanced session management, intelligent rate limiting, and real-time performance monitoring!**
 
-## ✨ Features
+## ✨ Core Features
 
 - 🔍 **Smart Parsing**: Automatically parses paper titles, authors, year, citation count, etc.
 - 🌳 **Tree Structure**: Builds clear citation relationships trees, supporting multi-level recursion.
@@ -23,6 +24,17 @@ PaperTracer is a powerful Google Scholar citation crawler that recursively crawl
 - ⚙️ **Flexible Configuration**: Customizable crawl depth, number of papers per level, etc.
 - 📈 **Detailed Statistics**: Provides detailed statistics of crawl results.
 
+## 🚀 New Enhanced Features (v2.0)
+
+- 🧠 **Intelligent 429 Error Handling**: Exponential backoff with time-window tracking
+- 💾 **Session Persistence**: Save and resume interrupted crawling sessions
+- 📊 **Performance Monitoring**: Real-time performance metrics and optimization suggestions  
+- 🔧 **Session Management**: Advanced session analysis, merging, and export tools
+- ⚡ **Enhanced Demo Script**: Comprehensive CLI with session recovery capabilities
+- 🛠️ **Chrome Driver Compatibility**: Improved browser fallback mechanisms
+
+📖 **[View Detailed Enhanced Features Guide →](ENHANCED_FEATURES.md)**
+
 ## 🚀 Quick Start
 
 ### 1. Install Dependencies
@@ -31,14 +43,50 @@ PaperTracer is a powerful Google Scholar citation crawler that recursively crawl
 pip install -r requirements.txt
 ```
 
-### 2. Run Demo
+### 2. Enhanced Demo (Recommended)
 
 ```bash
-# Run full demo (recommended for first use)
-python demo.py
+# Quick test with session saving
+python enhanced_demo.py --config quick --save-session
 
-# View help information
-python demo.py --help
+# Production crawl with aggressive rate limiting
+python enhanced_demo.py --config production --aggressive-delays --save-session
+
+# Resume interrupted session
+python enhanced_demo.py --resume session_20250602_123456
+
+# View help for all options
+python enhanced_demo.py --help
+```
+
+### 3. Session Management
+
+```bash
+# List all available sessions
+python session_manager.py list
+
+# Analyze specific session
+python session_manager.py analyze demo_20250602_002631
+
+# Merge two sessions
+python session_manager.py merge session1 session2 --output merged_session
+
+# Export session data
+python session_manager.py export session_id --format csv
+```
+
+### 4. Performance Monitoring
+
+```bash
+# Monitor crawling performance in real-time
+python performance_monitor.py --session-dir output/my_session --interval 2
+```
+
+### 5. Original Demo (Still Available)
+
+```bash
+# Run full demo (classic version)
+python demo.py
 
 # Use different configurations
 python demo.py --config production --depth 3

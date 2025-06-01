@@ -17,6 +17,8 @@ import platform
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 import traceback
+import pickle
+from datetime import datetime, timedelta
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -63,6 +65,7 @@ class GoogleScholarCrawler:
         self.delay_range = delay_range
         self.max_captcha_retries = max_captcha_retries
         self.use_browser_fallback = use_browser_fallback and BROWSER_AVAILABLE
+        self.use_headless_browser = True  # 添加缺失的属性
         self.captcha_service_api_key = captcha_service_api_key
         self.proxy_list = proxy_list or []
         self.proxy_index = 0
@@ -77,6 +80,11 @@ class GoogleScholarCrawler:
         ]
         self.request_count = 0
         self.browser = None
+        
+        # Session persistence
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.last_429_time = None
+        self.consecutive_429_count = 0
         
         # 设置更完整的请求头
         self._update_headers()
@@ -259,6 +267,9 @@ class GoogleScholarCrawler:
                 
                 logger.info(f"找到 {len(papers)} 篇有效引用论文 from {cited_by_url}")
                 
+                # 成功请求，重置429跟踪
+                self._reset_429_tracking()
+                
                 # 如果没有找到任何有效论文，记录调试信息
                 if not papers and paper_divs:
                     debug_file = f"debug_no_papers_{int(time.time())}.html"
@@ -269,7 +280,16 @@ class GoogleScholarCrawler:
                 return papers  # Success
             
             except requests.exceptions.RequestException as e:
-                logger.error(f"网络请求失败 ({cited_by_url}): {e} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                error_msg = str(e)
+                logger.error(f"网络请求失败 ({cited_by_url}): {error_msg} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                
+                # 特殊处理429错误 - Too Many Requests
+                if "429" in error_msg or "Too Many Requests" in error_msg:
+                    self._handle_429_error()
+                else:
+                    # 成功请求，重置429跟踪
+                    self._reset_429_tracking()
+                
                 attempt += 1
                 
                 # 如果是网络错误且未尝试过浏览器，切换到浏览器模式尝试
@@ -282,7 +302,9 @@ class GoogleScholarCrawler:
                     logger.error(f"网络请求失败次数过多，放弃爬取: {cited_by_url}")
                     return []
                     
-                time.sleep(random.uniform(3, 7) * (attempt + 1))
+                # 对于非429错误，使用标准延迟
+                if "429" not in error_msg and "Too Many Requests" not in error_msg:
+                    time.sleep(random.uniform(3, 7) * (attempt + 1))
                 browser_attempt = False  # 重置浏览器尝试状态
                 continue
                 
@@ -383,7 +405,16 @@ class GoogleScholarCrawler:
                     return None
             
             except requests.exceptions.RequestException as e:
-                logger.error(f"网络请求失败获取原始论文 ({scholar_url}): {e} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                error_msg = str(e)
+                logger.error(f"网络请求失败获取原始论文 ({scholar_url}): {error_msg} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                
+                # 特殊处理429错误 - Too Many Requests
+                if "429" in error_msg or "Too Many Requests" in error_msg:
+                    self._handle_429_error()
+                else:
+                    # 成功请求，重置429跟踪
+                    self._reset_429_tracking()
+                
                 attempt += 1
                 
                 # 如果是网络错误且未尝试过浏览器，切换到浏览器模式尝试
@@ -396,7 +427,9 @@ class GoogleScholarCrawler:
                     logger.error(f"网络请求失败次数过多，放弃获取原始论文: {scholar_url}")
                     return None
                 
-                time.sleep(random.uniform(3, 7) * (attempt + 1))
+                # 对于非429错误，使用标准延迟
+                if "429" not in error_msg and "Too Many Requests" not in error_msg:
+                    time.sleep(random.uniform(3, 7) * (attempt + 1))
                 browser_attempt = False  # 重置浏览器尝试状态
                 continue
                 
@@ -602,209 +635,113 @@ class GoogleScholarCrawler:
         return False
     
     def _adaptive_delay(self):
-        """自适应延迟策略"""
+        """自适应延迟策略 - 增强版，更好地应对Google Scholar反爬虫"""
         self.request_count += 1
         
+        # 检查是否最近遇到了429错误
+        delay_multiplier = 1.0
+        if self.last_429_time:
+            time_since_429 = datetime.now() - self.last_429_time
+            if time_since_429.total_seconds() < 300:  # 5分钟内
+                delay_multiplier = 2.0 + self.consecutive_429_count * 0.5
+                logger.info(f"最近遇到429错误，增加延迟倍数: {delay_multiplier:.1f}")
+        
         # 基础延迟
-        base_delay = random.uniform(*self.delay_range)
+        base_delay = random.uniform(*self.delay_range) * delay_multiplier
         
-        # 根据请求次数增加延迟
+        # 根据请求次数动态增加延迟 - 更激进的策略
+        if self.request_count > 5:
+            base_delay *= 1.3
         if self.request_count > 10:
-            base_delay *= 1.5
+            base_delay *= 1.8
         if self.request_count > 20:
-            base_delay *= 2
+            base_delay *= 2.5
+        if self.request_count > 30:
+            base_delay *= 3.0
         
-        # 偶尔使用更长的延迟
-        if random.random() < 0.1:  # 10%概率使用长延迟
-            base_delay *= 2
+        # 增加随机性以避免检测模式
+        if random.random() < 0.2:  # 20%概率使用更长延迟
+            base_delay *= random.uniform(2, 4)
+        
+        # 每隔一段时间使用特别长的延迟
+        if self.request_count % 15 == 0:
+            base_delay *= random.uniform(3, 6)
+            logger.info(f"使用特别长的延迟以降低被检测概率: {base_delay:.1f} 秒")
+        
+        # 限制最大延迟时间，避免过度等待
+        base_delay = min(base_delay, 300)  # 最多5分钟
         
         logger.debug(f"延迟 {base_delay:.1f} 秒 (请求次数: {self.request_count})")
         time.sleep(base_delay)
 
-    def _fetch_with_browser(self, url: str, wait_time=30) -> Optional[str]:
-        """使用无头浏览器获取页面内容，可以绕过一些CAPTCHA"""
-        if not BROWSER_AVAILABLE:
-            logger.warning("无法使用浏览器方式获取内容：浏览器模块未加载")
-            return None
+    def _handle_429_error(self):
+        """专门处理429错误的方法"""
+        self.last_429_time = datetime.now()
+        self.consecutive_429_count += 1
+        
+        # 指数退避，但有上限
+        backoff_delay = min(30 * (2 ** min(self.consecutive_429_count, 5)), 600)  # 最多10分钟
+        logger.warning(f"遇到429错误 (连续第{self.consecutive_429_count}次)，等待 {backoff_delay} 秒...")
+        
+        # 更新User-Agent
+        self._update_headers()
+        
+        time.sleep(backoff_delay)
+
+    def _reset_429_tracking(self):
+        """重置429错误跟踪"""
+        if self.consecutive_429_count > 0:
+            logger.info(f"成功请求，重置429错误计数 (之前连续{self.consecutive_429_count}次)")
+            self.consecutive_429_count = 0
             
-        logger.info(f"尝试使用浏览器获取页面内容: {url}")
+    def save_session_state(self, filepath: str):
+        """保存会话状态到文件"""
+        state = {
+            'session_id': self.session_id,
+            'visited_urls': list(self.visited_urls),
+            'request_count': self.request_count,
+            'last_429_time': self.last_429_time,
+            'consecutive_429_count': self.consecutive_429_count,
+            'current_proxy_index': self.proxy_index if hasattr(self, 'proxy_index') else 0
+        }
         
         try:
-            if self.browser is None:
-                # Set Chrome options to make browser less detectable
-                options = uc.ChromeOptions()
-                if not self.use_headless_browser:
-                    # Only run headless if explicitly enabled
-                    options.add_argument('--headless=new')  # Use new headless mode
-                options.add_argument('--no-sandbox')
-                options.add_argument('--disable-dev-shm-usage')
-                options.add_argument('--disable-gpu')
-                options.add_argument('--disable-infobars')
-                options.add_argument('--disable-extensions')
-                options.add_argument('--disable-blink-features=AutomationControlled')
-                options.add_argument('--window-size=1280,720')
-                options.add_experimental_option("excludeSwitches", ["enable-automation"])
-                options.add_experimental_option('useAutomationExtension', False)
-                
-                # 创建临时用户数据目录，以便隔离缓存和Cookie
-                user_dir = NamedTemporaryFile().name
-                options.add_argument(f'--user-data-dir={user_dir}')
-                
-                # 初始化浏览器
-                logger.info("初始化浏览器...")
-                # Set up stealth parameters
-                self.browser = uc.Chrome(options=options)
-                self.browser.set_page_load_timeout(60)
-                self.browser.implicitly_wait(10)
-                
-                # Execute stealth scripts to avoid detection
-                self.browser.execute_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-                )
-                self.browser.execute_cdp_cmd(
-                    'Network.setUserAgentOverride',
-                    {'userAgent': random.choice(self.user_agents)}
-                )
-                logger.info("浏览器初始化完成，启用了反检测功能")
-            
-            # 访问页面
-            logger.info(f"浏览器正在打开: {url}")
-            self.browser.get(url)
-            
-            # 等待页面加载
-            try:
-                # 等待页面主体元素加载完成
-                WebDriverWait(self.browser, wait_time).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
-                )
-                
-                # 额外等待，确保动态内容加载
-                time.sleep(5)
-                
-                # 获取页面源代码
-                page_source = self.browser.page_source
-                
-                # 检查是否仍然有验证码
-                if "recaptcha" in page_source.lower() or "please show you're not a robot" in page_source.lower():
-                    if self.captcha_service_api_key:
-                        logger.info("尝试使用2Captcha服务解决验证码...")
-                        solved = self._solve_captcha_with_service()
-                        if solved:
-                            logger.info("验证码已解决，重新加载页面...")
-                            self.browser.refresh()
-                            time.sleep(5)
-                            page_source = self.browser.page_source
-                        else:
-                            logger.warning("2Captcha服务无法解决验证码")
-                    else:
-                        logger.warning("浏览器方式仍然遇到了验证码，且未配置CAPTCHA服务")
-                        # 保存截图以供调试
-                        screenshot_path = f"browser_captcha_{int(time.time())}.png"
-                        self.browser.save_screenshot(screenshot_path)
-                        logger.info(f"已保存浏览器截图: {screenshot_path}")
-                        return None
-                
-                logger.info("浏览器成功获取页面内容")
-                return page_source
-                
-            except TimeoutException:
-                logger.error(f"等待页面元素超时: {url}")
-                return None
-                
-        except WebDriverException as e:
-            logger.error(f"浏览器遇到错误: {e}")
-            return None
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2, default=str)
+            logger.info(f"会话状态已保存到: {filepath}")
         except Exception as e:
-            logger.error(f"使用浏览器获取内容时发生未知错误: {e}")
-            logger.error(traceback.format_exc())
-            return None
-    
-    def _close_browser(self):
-        """关闭浏览器实例"""
-        if self.browser is not None:
-            try:
-                logger.info("正在关闭浏览器...")
-                self.browser.quit()
-                self.browser = None
-                logger.info("浏览器已关闭")
-            except Exception as e:
-                logger.error(f"关闭浏览器时发生错误: {e}")
-    
-    def _solve_captcha_with_service(self) -> bool:
-        """使用2Captcha服务解决验证码"""
-        try:
-            from twocaptcha import TwoCaptcha
-            
-            # 如果使用代理，配置2Captcha使用相同代理
-            solver_config = {'apiKey': self.captcha_service_api_key}
-            if self.current_proxy:
-                solver_config['defaultTimeout'] = 120
-                solver_config['recaptchaTimeout'] = 600
-                solver_config['pollingInterval'] = 10
-                
-                if self.current_proxy.startswith('http'):
-                    solver_config['proxy'] = {
-                        'type': 'HTTP',
-                        'uri': self.current_proxy
-                    }
-                else:
-                    solver_config['proxy'] = {
-                        'type': 'SOCKS5',
-                        'uri': self.current_proxy
-                    }
-            
-            solver = TwoCaptcha(**solver_config)
-            
-            if not self.captcha_service_api_key:
-                logger.warning("未配置2Captcha API密钥，无法使用验证码解决服务")
-                return False
-                
-            # 提取reCAPTCHA sitekey
-            sitekey = self.browser.find_element(By.CSS_SELECTOR, '[data-sitekey]').get_attribute('data-sitekey')
-            if not sitekey:
-                logger.error("无法在页面上找到reCAPTCHA sitekey")
-                return False
-                
-            # 获取当前URL
-            page_url = self.browser.current_url
-            
-            # 创建2Captcha求解器
-            solver = TwoCaptcha(self.captcha_service_api_key)
-            
-            try:
-                logger.info("正在向2Captcha发送验证码求解请求...")
-                result = solver.recaptcha(sitekey, page_url)
-                logger.info(f"2Captcha返回结果: {result}")
-                
-                # 将解决方案注入页面
-                self.browser.execute_script(
-                    f"document.getElementById('g-recaptcha-response').innerHTML = '{result['code']}';"
-                )
-                time.sleep(1)
-                
-                # 提交验证码表单
-                submit_button = self.browser.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
-                submit_button.click()
-                time.sleep(5)
-                
-                logger.info("验证码解决方案已提交")
-                return True
-                
-            except Exception as e:
-                logger.error(f"2Captcha服务错误: {e}")
-                return False
-                
-        except ImportError:
-            logger.error("未安装2Captcha Python库，请运行: pip install 2captcha-python")
-            return False
-        except Exception as e:
-            logger.error(f"解决验证码时出错: {e}")
-            return False
-            
-    def __del__(self):
-        """析构函数，确保释放浏览器资源"""
-        self._close_browser()
+            logger.error(f"保存会话状态失败: {e}")
 
+    def load_session_state(self, filepath: str) -> bool:
+        """从文件加载会话状态"""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            
+            self.session_id = state.get('session_id', self.session_id)
+            self.visited_urls = set(state.get('visited_urls', []))
+            self.request_count = state.get('request_count', 0)
+            self.consecutive_429_count = state.get('consecutive_429_count', 0)
+            self.proxy_index = state.get('current_proxy_index', 0)
+            
+            # 处理时间字符串
+            last_429_str = state.get('last_429_time')
+            if last_429_str and last_429_str != 'None':
+                try:
+                    self.last_429_time = datetime.fromisoformat(last_429_str.replace('Z', '+00:00'))
+                except:
+                    self.last_429_time = None
+            
+            logger.info(f"会话状态已从 {filepath} 恢复")
+            logger.info(f"  - 会话ID: {self.session_id}")
+            logger.info(f"  - 已访问URL数: {len(self.visited_urls)}")
+            logger.info(f"  - 请求计数: {self.request_count}")
+            logger.info(f"  - 连续429错误: {self.consecutive_429_count}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"加载会话状态失败: {e}")
+            return False
 def print_citation_tree(node: CitationNode, indent: str = ""):
     """打印引用树"""
     print(f"{indent}📄 {node.paper.title}")
@@ -853,6 +790,13 @@ def main():
         delay_range=(1, 3)  # 请求间隔时间范围（秒）
     )
     
+    # 尝试加载先前的会话
+    session_file = "crawler_session.pkl"
+    try:
+        crawler.load_session(session_file)
+    except Exception as e:
+        logger.error(f"加载会话时出错，继续执行: {e}")
+    
     print("🚀 开始构建引用树...")
     print(f"📋 起始链接: {sample_link}")
     print(f"📊 最大深度: {crawler.max_depth}")
@@ -882,6 +826,9 @@ def main():
         print(f"   总论文数: {total_papers}")
         print(f"   树的深度: {citation_tree.depth}")
         print(f"   根节点子节点数: {len(citation_tree.children)}")
+        
+        # 保存当前会话
+        crawler.save_session(session_file)
         
     else:
         print("❌ 无法构建引用树")
