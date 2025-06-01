@@ -14,8 +14,8 @@ class Config:
     OUTPUT_DIR = "output"
     
     # Crawler default configuration
-    DEFAULT_MAX_DEPTH = 2
-    DEFAULT_MAX_PAPERS_PER_LEVEL = 3
+    DEFAULT_MAX_DEPTH = 10
+    DEFAULT_MAX_PAPERS_PER_LEVEL = 30
     DEFAULT_DELAY_RANGE = (1, 2)
     
     # File naming configuration
