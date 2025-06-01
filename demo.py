@@ -6,19 +6,38 @@ Google Scholar 引用爬虫 - 完整示例
 
 import sys
 import os
+from datetime import datetime
 from papertracer import GoogleScholarCrawler, print_citation_tree, save_tree_to_json
+from papertracer_config import Config, DEMO_CONFIG
+
+def ensure_output_directory():
+    """确保输出目录存在"""
+    created = Config.ensure_output_directory()
+    if created:
+        print(f"   ✓ 创建输出目录: {Config.OUTPUT_DIR}/")
+    else:
+        print(f"   ✓ 输出目录已存在: {Config.OUTPUT_DIR}/")
+    return Config.OUTPUT_DIR
 
 def demo_workflow():
     """演示完整的工作流程"""
     print("🕷️  Google Scholar 引用爬虫 - 完整演示")
     print("=" * 60)
     
+    # 步骤0: 准备输出目录
+    print("📁 步骤0: 准备输出目录...")
+    output_dir = ensure_output_directory()
+    
+    # 生成带时间戳的文件名前缀
+    file_prefix = Config.get_timestamped_filename(extension="").rstrip('.')
+    
     # 步骤1: 创建爬虫实例
     print("🔧 步骤1: 配置爬虫...")
+    config = DEMO_CONFIG
     crawler = GoogleScholarCrawler(
-        max_depth=2,              # 递归深度为2（为了演示速度）
-        max_papers_per_level=3,   # 每层最多3篇论文
-        delay_range=(1, 2)        # 1-2秒延迟
+        max_depth=config['max_depth'],
+        max_papers_per_level=config['max_papers_per_level'],
+        delay_range=config['delay_range']
     )
     print("   ✓ 爬虫配置完成")
     
@@ -47,29 +66,46 @@ def demo_workflow():
         
         # 步骤5: 保存数据
         print("\n💾 步骤5: 保存数据...")
-        json_filename = "demo_citation_tree.json"
-        save_tree_to_json(citation_tree, json_filename)
-        print(f"   ✓ 数据已保存到: {json_filename}")
+        json_filename = Config.get_timestamped_filename(
+            prefix="demo",
+            suffix="citation_tree",
+            extension="json"
+        )
+        json_path = Config.get_output_path(json_filename)
+        save_tree_to_json(citation_tree, json_path)
+        print(f"   ✓ 数据已保存到: {json_path}")
         
         # 步骤6: 创建可视化（如果可能）
         print("\n🎨 步骤6: 创建可视化图表...")
         try:
             from visualize_tree import CitationTreeVisualizer
             
-            visualizer = CitationTreeVisualizer(json_filename)
+            visualizer = CitationTreeVisualizer(json_path)
             
             # 创建简单的网络图
             print("   正在创建网络图...")
-            visualizer.create_simple_visualization("demo_simple.png", figsize=(12, 8))
+            simple_filename = Config.get_timestamped_filename(
+                prefix="demo",
+                suffix="simple",
+                extension="png"
+            )
+            simple_path = Config.get_output_path(simple_filename)
+            visualizer.create_simple_visualization(simple_path, figsize=config['figsize'])
             
             # 创建统计图表
             print("   正在创建统计图表...")
-            visualizer.create_statistics_plot("demo_stats.png")
+            stats_filename = Config.get_timestamped_filename(
+                prefix="demo",
+                suffix="stats",
+                extension="png"
+            )
+            stats_path = Config.get_output_path(stats_filename)
+            visualizer.create_statistics_plot(stats_path)
             
             print("   ✅ 可视化图表创建完成!")
             print(f"   📁 输出文件:")
-            print(f"      - demo_simple.png (网络图)")
-            print(f"      - demo_stats.png (统计图)")
+            print(f"      - {simple_path} (网络图)")
+            print(f"      - {stats_path} (统计图)")
             
         except ImportError as e:
             print(f"   ⚠️  可视化功能需要额外依赖: {e}")
@@ -113,12 +149,14 @@ def demo_workflow():
         # 步骤8: 展示如何使用数据
         print("\n🛠️  步骤8: 如何使用生成的数据...")
         print("   1. JSON文件可以导入到其他程序进行进一步分析")
-        print("   2. 可以使用以下命令创建更多可视化:")
+        print("   2. 所有输出文件都保存在 output/ 目录中，便于管理")
+        print("   3. 可以使用以下命令创建更多可视化:")
         print(f"      python visualize_tree.py {json_filename} --type all")
-        print("   3. 数据结构说明:")
+        print("   4. 数据结构说明:")
         print("      - 每个节点包含论文的完整信息")
         print("      - 树形结构保持了引用的层次关系")
         print("      - 可以递归遍历整个引用网络")
+        print("   5. 文件命名包含时间戳，避免覆盖之前的结果")
         
         print("\n✅ 演示完成!")
         print("=" * 60)
@@ -144,12 +182,13 @@ def show_usage():
     print("   demo.py           - 完整演示脚本")
     print("   requirements.txt  - 依赖列表")
     print("   README.md         - 详细说明文档")
+    print("   output/           - 输出目录（自动创建）")
     print()
     print("🚀 快速开始:")
     print("   1. 安装依赖:     pip install -r requirements.txt")
     print("   2. 运行演示:     python demo.py --demo")
     print("   3. 交互测试:     python test_crawler.py --interactive")
-    print("   4. 创建可视化:   python visualize_tree.py <json_file>")
+    print("   4. 创建可视化:   python visualize_tree.py output/<json_file>")
     print()
     print("⚙️  使用选项:")
     print("   python demo.py --demo    # 运行完整演示")
@@ -158,7 +197,9 @@ def show_usage():
     print("💡 提示:")
     print("   - 首次使用建议先运行演示来了解功能")
     print("   - 可以修改 papertrace.py 中的参数来自定义爬取行为")
+    print("   - 所有输出文件（JSON和图表）都会保存在 output/ 目录中")
     print("   - 生成的JSON文件可以重复用于创建不同类型的可视化")
+    print("   - 文件名包含时间戳，避免覆盖之前的结果")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

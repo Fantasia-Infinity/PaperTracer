@@ -22,7 +22,17 @@ PaperTracer 是一个强大的Google Scholar引用关系爬虫工具，可以递
 pip install -r requirements.txt
 ```
 
-### 2. 基本使用
+### 2. 运行演示
+
+```bash
+# 运行完整演示（推荐首次使用）
+python demo.py --demo
+
+# 查看帮助信息
+python demo.py --help
+```
+
+### 3. 基本使用
 
 ```python
 from papertracer import GoogleScholarCrawler, print_citation_tree, save_tree_to_json
@@ -44,8 +54,8 @@ if citation_tree:
     # 打印树结构
     print_citation_tree(citation_tree)
     
-    # 保存为JSON文件
-    save_tree_to_json(citation_tree, "citation_tree.json")
+    # 保存为JSON文件（会自动保存到output/目录）
+    save_tree_to_json(citation_tree, "output/citation_tree.json")
 ```
 
 ### 3. 使用测试工具
@@ -95,6 +105,17 @@ class CitationNode:
 
 ## 📁 输出文件
 
+### 目录结构
+所有输出文件都会保存在 `output/` 目录中，按时间戳命名以避免覆盖：
+
+```
+output/
+├── demo_20250601_143052_citation_tree.json    # 引用数据文件
+├── demo_20250601_143052_simple.png            # 简单网络图
+├── demo_20250601_143052_stats.png             # 统计图表
+└── README.md                                   # 输出目录说明
+```
+
 ### JSON格式
 生成的JSON文件包含完整的树形结构：
 
@@ -119,6 +140,10 @@ class CitationNode:
   ]
 }
 ```
+
+### 可视化图表
+- **简单网络图** (`*_simple.png`): 显示引用关系的网络结构
+- **统计图表** (`*_stats.png`): 包含深度分布、引用次数分布等统计信息
 
 ## 🔧 高级用法
 
@@ -149,7 +174,20 @@ urls = [
 for i, url in enumerate(urls):
     tree = crawler.build_citation_tree(url)
     if tree:
-        save_tree_to_json(tree, f"citation_tree_{i}.json")
+        save_tree_to_json(tree, f"output/citation_tree_{i}.json")
+```
+
+### 可视化工具
+
+```bash
+# 创建所有类型的可视化图表
+python visualize_tree.py output/demo_20250601_143052_citation_tree.json --type all
+
+# 只创建简单网络图
+python visualize_tree.py output/demo_20250601_143052_citation_tree.json --type simple
+
+# 指定输出路径
+python visualize_tree.py output/demo_20250601_143052_citation_tree.json --output output/my_visualization
 ```
 
 ## ⚠️ 注意事项

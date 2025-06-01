@@ -129,6 +129,7 @@ dmypy.json
 .pyre/
 
 # Project specific
+output/
 *.json
 *.png
 *.jpg

@@ -5,12 +5,14 @@ Google Scholar 引用树可视化工具
 """
 
 import json
+import os
 import matplotlib.pyplot as plt
 import networkx as nx
 from matplotlib.patches import FancyBboxPatch
 import textwrap
 from typing import Dict, List, Tuple
 import argparse
+from papertracer_config import Config
 
 # 设置中文字体支持
 plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'DejaVu Sans']
@@ -322,6 +324,12 @@ def main():
         print(f"📁 输入文件: {args.json_file}")
         print(f"🎯 可视化类型: {args.type}")
         print("-" * 50)
+        
+        # 确保输出目录存在
+        output_dir = os.path.dirname(args.output) if os.path.dirname(args.output) else "."
+        if output_dir != "." and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            print(f"📁 创建输出目录: {output_dir}")
         
         if args.type == 'simple' or args.type == 'all':
             visualizer.create_simple_visualization(f"{args.output}_simple.png")
