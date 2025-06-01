@@ -18,9 +18,9 @@ def setup_argument_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  python demo_enhanced.py --url "https://scholar.google.com/..."
-  python demo_enhanced.py --config production --depth 3
-  python demo_enhanced.py --config quick --no-visualization
+  python demo.py --url "https://scholar.google.com/..."
+  python demo.py --config production --depth 3
+  python demo.py --config quick --no-visualization
         """
     )
     
@@ -67,6 +67,19 @@ def setup_argument_parser():
         '--no-visualization',
         action='store_true',
         help='跳过所有可视化生成'
+    )
+    
+    parser.add_argument(
+        '--no-browser',
+        action='store_true',
+        help='禁用浏览器fallback模式 (当CAPTCHA出现时)'
+    )
+    
+    parser.add_argument(
+        '--captcha-retries',
+        type=int,
+        default=3,
+        help='CAPTCHA重试次数 (默认: 3)'
     )
     
     parser.add_argument(
@@ -123,13 +136,17 @@ def run_enhanced_demo():
         logger.info(f"   - 递归深度: {config['max_depth']}")
         logger.info(f"   - 每层论文数: {config['max_papers_per_level']}")
         logger.info(f"   - 延迟范围: {config['delay_range']} 秒")
+        logger.info(f"   - CAPTCHA重试次数: {args.captcha_retries}")
+        logger.info(f"   - 浏览器fallback模式: {'禁用' if args.no_browser else '启用'}")
         
         # 创建爬虫实例
         logger.info("🚀 初始化爬虫...")
         crawler = GoogleScholarCrawler(
             max_depth=config['max_depth'],
             max_papers_per_level=config['max_papers_per_level'],
-            delay_range=config['delay_range']
+            delay_range=config['delay_range'],
+            max_captcha_retries=args.captcha_retries,
+            use_browser_fallback=not args.no_browser
         )
         
         # 显示起始URL

@@ -13,10 +13,27 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional, Set
 import json
 import logging
+import platform
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+import traceback
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# 尝试导入无头浏览器相关依赖（可选的，用于处理CAPTCHA）
+BROWSER_AVAILABLE = False
+try:
+    import undetected_chromedriver as uc
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+    BROWSER_AVAILABLE = True
+    logger.info("浏览器模块已加载，可用于处理CAPTCHA")
+except ImportError:
+    logger.warning("浏览器模块导入失败，无法使用浏览器绕过CAPTCHA。考虑安装: pip install undetected-chromedriver selenium")
 
 @dataclass
 class Paper:
@@ -39,10 +56,16 @@ class CitationNode:
 class GoogleScholarCrawler:
     """Google Scholar 爬虫类"""
     
-    def __init__(self, max_depth=3, max_papers_per_level=10, delay_range=(2, 5)):
+    def __init__(self, max_depth=3, max_papers_per_level=10, delay_range=(2, 5), max_captcha_retries=3,
+                 use_browser_fallback=True, captcha_service_api_key=None, proxy_list=None):
         self.max_depth = max_depth
         self.max_papers_per_level = max_papers_per_level
         self.delay_range = delay_range
+        self.max_captcha_retries = max_captcha_retries
+        self.use_browser_fallback = use_browser_fallback and BROWSER_AVAILABLE
+        self.captcha_service_api_key = captcha_service_api_key
+        self.proxy_list = proxy_list or []
+        self.proxy_index = 0
         self.visited_urls: Set[str] = set()
         self.session = requests.Session()
         self.user_agents = [
@@ -53,6 +76,7 @@ class GoogleScholarCrawler:
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
         ]
         self.request_count = 0
+        self.browser = None
         
         # 设置更完整的请求头
         self._update_headers()
@@ -164,95 +188,241 @@ class GoogleScholarCrawler:
         if not cited_by_url or cited_by_url in self.visited_urls:
             return []
         
-        self.visited_urls.add(cited_by_url)
+        self.visited_urls.add(cited_by_url)  # Mark as visited once we start processing it
         
-        try:
-            logger.info(f"正在爬取: {cited_by_url}")
+        attempt = 0
+        browser_attempt = False  # 标记是否已尝试使用浏览器
+        
+        while attempt < self.max_captcha_retries:
+            try:
+                logger.info(f"正在爬取: {cited_by_url} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                
+                # 使用浏览器fallback尝试绕过CAPTCHA
+                if browser_attempt and self.use_browser_fallback:
+                    logger.info("尝试使用浏览器方式绕过CAPTCHA...")
+                    html_content = self._fetch_with_browser(cited_by_url)
+                    if html_content:
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                    else:
+                        logger.warning("浏览器获取内容失败，返回空结果")
+                        return []
+                else:
+                    # 常规请求方法
+                    self._adaptive_delay()
+                    
+                    if self.request_count % 5 == 0:
+                        self._update_headers()
+                    
+                    response = self.session.get(cited_by_url, timeout=20)
+                    response.raise_for_status()
+                    
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # 检测CAPTCHA或封禁
+                if self._is_captcha_page(soup):
+                    logger.warning(f"CAPTCHA 检测于: {cited_by_url} (尝试 {attempt + 1})")
+                    
+                    # 如果还没尝试过浏览器方法，且配置允许，则尝试浏览器方法
+                    if not browser_attempt and self.use_browser_fallback:
+                        logger.info("检测到CAPTCHA，切换到浏览器方式尝试...")
+                        browser_attempt = True
+                        # 不增加尝试次数，直接进入下一循环用浏览器访问
+                        continue
+                    
+                    # 已经尝试过浏览器或不允许使用浏览器，则处理CAPTCHA
+                    self._handle_captcha_or_block(cited_by_url, response.text if 'response' in locals() else "", attempt)
+                    attempt += 1
+                    
+                    if attempt >= self.max_captcha_retries:
+                        logger.error(f"CAPTCHA 验证失败次数过多，放弃爬取: {cited_by_url}")
+                        return []
+                    
+                    logger.info(f"CAPTCHA 后等待后重试 ({attempt + 1}/{self.max_captcha_retries}): {cited_by_url}")
+                    browser_attempt = False  # 重置浏览器尝试状态，再次从常规请求开始
+                    continue
+                
+                # 查找所有论文结果
+                paper_divs = soup.find_all('div', class_='gs_r')
+                
+                # 如果没有找到结果，可能是页面结构发生了变化
+                if not paper_divs:
+                    logger.warning(f"未找到论文结果，可能页面结构已变化: {cited_by_url}")
+                    # 尝试其他可能的选择器
+                    paper_divs = soup.find_all('div', class_='gs_ri') or soup.find_all('div', {'data-lid': True})
+                
+                papers = []
+                
+                for div in paper_divs[:self.max_papers_per_level]:
+                    paper = self._parse_paper_info(div)
+                    if paper.title != "Parse Error" and paper.title != "Unknown Title":
+                        papers.append(paper)
+                
+                logger.info(f"找到 {len(papers)} 篇有效引用论文 from {cited_by_url}")
+                
+                # 如果没有找到任何有效论文，记录调试信息
+                if not papers and paper_divs:
+                    debug_file = f"debug_no_papers_{int(time.time())}.html"
+                    with open(debug_file, 'w', encoding='utf-8') as f:
+                        f.write(soup.prettify())
+                    logger.warning(f"解析成功但未提取到论文，已保存调试页面到: {debug_file}")
+                
+                return papers  # Success
             
-            # 使用自适应延迟
-            self._adaptive_delay()
-            
-            # 每隔几个请求更新一次请求头
-            if self.request_count % 5 == 0:
-                self._update_headers()
-            
-            response = self.session.get(cited_by_url, timeout=15)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # 检测CAPTCHA或封禁
-            if self._is_captcha_page(soup):
-                self._handle_captcha_or_block(cited_by_url, response.text)
-                return []
-            
-            # 查找所有论文结果
-            paper_divs = soup.find_all('div', class_='gs_r')
-            
-            # 如果没有找到结果，可能是页面结构发生了变化
-            if not paper_divs:
-                logger.warning(f"未找到论文结果，可能页面结构已变化: {cited_by_url}")
-                # 尝试其他可能的选择器
-                paper_divs = soup.find_all('div', class_='gs_ri') or soup.find_all('div', {'data-lid': True})
-            
-            papers = []
-            
-            for div in paper_divs[:self.max_papers_per_level]:
-                paper = self._parse_paper_info(div)
-                if paper.title != "Parse Error" and paper.title != "Unknown Title":
-                    papers.append(paper)
-            
-            logger.info(f"找到 {len(papers)} 篇有效引用论文")
-            
-            # 如果没有找到任何有效论文，记录调试信息
-            if not papers and paper_divs:
-                debug_file = f"debug_no_papers_{int(time.time())}.html"
-                with open(debug_file, 'w', encoding='utf-8') as f:
-                    f.write(response.text)
-                logger.warning(f"解析失败，已保存调试页面到: {debug_file}")
-            
-            return papers
-            
-        except requests.RequestException as e:
-            logger.error(f"网络请求失败: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"解析页面失败: {e}")
-            return []
-    
+            except requests.exceptions.RequestException as e:
+                logger.error(f"网络请求失败 ({cited_by_url}): {e} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                attempt += 1
+                
+                # 如果是网络错误且未尝试过浏览器，切换到浏览器模式尝试
+                if not browser_attempt and self.use_browser_fallback:
+                    logger.info("网络请求失败，切换到浏览器方式尝试...")
+                    browser_attempt = True
+                    continue
+                
+                if attempt >= self.max_captcha_retries:
+                    logger.error(f"网络请求失败次数过多，放弃爬取: {cited_by_url}")
+                    return []
+                    
+                time.sleep(random.uniform(3, 7) * (attempt + 1))
+                browser_attempt = False  # 重置浏览器尝试状态
+                continue
+                
+            except Exception as e:
+                logger.error(f"解析页面时发生未知错误 ({cited_by_url}): {e} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                # 保存调试 HTML for unexpected errors during parsing
+                if 'response' in locals() and hasattr(response, 'text'):
+                    debug_file = f"debug_parse_error_{int(time.time())}.html"
+                    try:
+                        with open(debug_file, 'w', encoding='utf-8') as f:
+                            f.write(response.text)
+                        logger.warning(f"未知解析错误，已保存调试页面到: {debug_file}")
+                    except Exception as e_debug:
+                        logger.error(f"保存调试页面失败: {e_debug}")
+                
+                attempt += 1
+                if attempt >= self.max_captcha_retries:
+                    logger.error(f"未知错误次数过多，放弃爬取: {cited_by_url}")
+                    return []
+                time.sleep(random.uniform(3, 7) * (attempt + 1))
+                browser_attempt = False  # 重置浏览器尝试状态
+                continue
+        
+        logger.error(f"所有尝试均失败: {cited_by_url}")
+        return []
+
     def _get_paper_from_scholar_url(self, scholar_url: str) -> Optional[Paper]:
         """从Scholar搜索URL获取原始论文信息"""
-        try:
-            logger.info(f"获取原始论文信息: {scholar_url}")
-            
-            self._adaptive_delay()
-            
-            response = self.session.get(scholar_url, timeout=15)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # 检测CAPTCHA或封禁
-            if self._is_captcha_page(soup):
-                self._handle_captcha_or_block(scholar_url, response.text)
-                return None
-            
-            # 查找第一个搜索结果
-            first_result = soup.find('div', class_='gs_r')
-            if not first_result:
-                # 尝试其他可能的选择器
-                first_result = soup.find('div', class_='gs_ri') or soup.find('div', {'data-lid': True})
-            
-            if first_result:
-                return self._parse_paper_info(first_result)
-            else:
-                logger.warning("未找到搜索结果")
-                
-        except Exception as e:
-            logger.error(f"获取原始论文信息失败: {e}")
+        attempt = 0
+        browser_attempt = False  # 标记是否已尝试使用浏览器
         
+        while attempt < self.max_captcha_retries:
+            try:
+                logger.info(f"获取原始论文信息: {scholar_url} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                
+                # 使用浏览器fallback尝试绕过CAPTCHA
+                if browser_attempt and self.use_browser_fallback:
+                    logger.info("尝试使用浏览器方式绕过CAPTCHA...")
+                    html_content = self._fetch_with_browser(scholar_url)
+                    if html_content:
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                    else:
+                        logger.warning("浏览器获取内容失败，返回None")
+                        return None
+                else:
+                    # 常规请求方法
+                    self._adaptive_delay()
+                    
+                    if self.request_count % 5 == 0:
+                        self._update_headers()
+                    
+                    response = self.session.get(scholar_url, timeout=20)
+                    response.raise_for_status()
+                    
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # 检测CAPTCHA或封禁
+                if self._is_captcha_page(soup):
+                    logger.warning(f"CAPTCHA 检测于获取原始论文: {scholar_url} (尝试 {attempt + 1})")
+                    
+                    # 如果还没尝试过浏览器方法，且配置允许，则尝试浏览器方法
+                    if not browser_attempt and self.use_browser_fallback:
+                        logger.info("检测到CAPTCHA，切换到浏览器方式尝试...")
+                        browser_attempt = True
+                        # 不增加尝试次数，直接进入下一循环用浏览器访问
+                        continue
+                    
+                    # 已经尝试过浏览器或不允许使用浏览器，则处理CAPTCHA
+                    self._handle_captcha_or_block(scholar_url, response.text if 'response' in locals() else "", attempt)
+                    attempt += 1
+                    
+                    if attempt >= self.max_captcha_retries:
+                        logger.error(f"CAPTCHA 验证失败次数过多，放弃获取原始论文: {scholar_url}")
+                        return None
+                    
+                    logger.info(f"CAPTCHA 后等待后重试 ({attempt + 1}/{self.max_captcha_retries}): {scholar_url}")
+                    browser_attempt = False  # 重置浏览器尝试状态，再次从常规请求开始
+                    continue
+                
+                # 查找第一个搜索结果
+                first_result = soup.find('div', class_='gs_r')
+                if not first_result:
+                    # 尝试其他可能的选择器
+                    first_result = soup.find('div', class_='gs_ri') or soup.find('div', {'data-lid': True})
+                
+                if first_result:
+                    return self._parse_paper_info(first_result)
+                else:
+                    logger.warning(f"未找到搜索结果 for {scholar_url}")
+                    # 如果是浏览器方式获取的结果，保存页面进行调试
+                    if browser_attempt:
+                        debug_file = f"debug_browser_no_results_{int(time.time())}.html"
+                        with open(debug_file, 'w', encoding='utf-8') as f:
+                            f.write(soup.prettify())
+                        logger.warning(f"浏览器获取页面无结果，已保存调试页面到: {debug_file}")
+                    
+                    # 如果页面加载成功但没有结果，可能是真的找不到
+                    return None
+            
+            except requests.exceptions.RequestException as e:
+                logger.error(f"网络请求失败获取原始论文 ({scholar_url}): {e} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                attempt += 1
+                
+                # 如果是网络错误且未尝试过浏览器，切换到浏览器模式尝试
+                if not browser_attempt and self.use_browser_fallback:
+                    logger.info("网络请求失败，切换到浏览器方式尝试...")
+                    browser_attempt = True
+                    continue
+                
+                if attempt >= self.max_captcha_retries:
+                    logger.error(f"网络请求失败次数过多，放弃获取原始论文: {scholar_url}")
+                    return None
+                
+                time.sleep(random.uniform(3, 7) * (attempt + 1))
+                browser_attempt = False  # 重置浏览器尝试状态
+                continue
+                
+            except Exception as e:
+                logger.error(f"获取原始论文信息时发生未知错误 ({scholar_url}): {e} (尝试 {attempt + 1}/{self.max_captcha_retries})")
+                if 'response' in locals() and hasattr(response, 'text'):
+                    debug_file = f"debug_get_paper_error_{int(time.time())}.html"
+                    try:
+                        with open(debug_file, 'w', encoding='utf-8') as f:
+                            f.write(response.text)
+                        logger.warning(f"未知错误获取原始论文，已保存调试页面到: {debug_file}")
+                    except Exception as e_debug:
+                        logger.error(f"保存调试页面失败: {e_debug}")
+                
+                attempt += 1
+                if attempt >= self.max_captcha_retries:
+                    logger.error(f"未知错误次数过多，放弃获取原始论文: {scholar_url}")
+                    return None
+                
+                time.sleep(random.uniform(3, 7) * (attempt + 1))
+                browser_attempt = False  # 重置浏览器尝试状态
+                continue
+        
+        logger.error(f"所有尝试均失败获取原始论文: {scholar_url}")
         return None
-    
+
     def build_citation_tree(self, start_url: str, current_depth: int = 0) -> Optional[CitationNode]:
         """递归构建引用树"""
         if current_depth >= self.max_depth:
@@ -341,6 +511,38 @@ class GoogleScholarCrawler:
             'Sec-Fetch-Site': 'none',
             'Cache-Control': 'max-age=0'
         })
+        
+    def _rotate_proxy(self):
+        """轮换代理服务器"""
+        if not self.proxy_list:
+            return
+            
+        self.proxy_index = (self.proxy_index + 1) % len(self.proxy_list)
+        self.current_proxy = self.proxy_list[self.proxy_index]
+        logger.info(f"轮换代理到: {self.current_proxy}")
+        
+        # 更新session代理
+        if self.current_proxy:
+            if self.current_proxy.startswith('http'):
+                self.session.proxies = {
+                    'http': self.current_proxy,
+                    'https': self.current_proxy
+                }
+            else:
+                self.session.proxies = {
+                    'http': f'socks5://{self.current_proxy}',
+                    'https': f'socks5://{self.current_proxy}'
+                }
+                
+        # 更新浏览器代理（如果浏览器已初始化）
+        if self.browser:
+            try:
+                logger.info("正在关闭浏览器以应用新代理...")
+                self.browser.quit()
+                self.browser = None
+                logger.info("浏览器已关闭，将在下次请求时重新初始化")
+            except Exception as e:
+                logger.error(f"关闭浏览器时出错: {e}")
     
     def _is_captcha_page(self, soup: BeautifulSoup) -> bool:
         """检测是否遇到了CAPTCHA页面"""
@@ -364,11 +566,21 @@ class GoogleScholarCrawler:
         if soup.find('iframe', src=lambda x: x and 'recaptcha' in x):
             return True
             
+        # Additional indicators for CAPTCHA
+        additional_indicators = [
+            'unusual traffic from your network',
+            'automated requests from your computer',
+            'network is sending automated queries'
+        ]
+        for indicator in additional_indicators:
+            if indicator in page_text:
+                return True
+                
         return False
     
-    def _handle_captcha_or_block(self, url: str, response_text: str) -> bool:
+    def _handle_captcha_or_block(self, url: str, response_text: str, attempt: int) -> bool:
         """处理CAPTCHA或封禁情况"""
-        logger.warning(f"检测到CAPTCHA或访问被阻止: {url}")
+        logger.warning(f"检测到CAPTCHA或访问被阻止: {url} (尝试 #{attempt+1})")
         
         # 保存调试信息
         debug_file = f"debug_captcha_{int(time.time())}.html"
@@ -376,9 +588,12 @@ class GoogleScholarCrawler:
             f.write(response_text)
         logger.info(f"已保存调试页面到: {debug_file}")
         
-        # 增加延迟时间
-        delay = random.uniform(10, 20)
-        logger.info(f"遇到CAPTCHA，等待 {delay:.1f} 秒...")
+        # 轮换代理
+        self._rotate_proxy()
+        
+        # 指数退避延迟
+        delay = random.uniform(10, 20) * (1.5 ** attempt)
+        logger.info(f"遇到CAPTCHA，等待 {delay:.1f} 秒 (指数退避)...")
         time.sleep(delay)
         
         # 更新请求头
@@ -405,6 +620,190 @@ class GoogleScholarCrawler:
         
         logger.debug(f"延迟 {base_delay:.1f} 秒 (请求次数: {self.request_count})")
         time.sleep(base_delay)
+
+    def _fetch_with_browser(self, url: str, wait_time=30) -> Optional[str]:
+        """使用无头浏览器获取页面内容，可以绕过一些CAPTCHA"""
+        if not BROWSER_AVAILABLE:
+            logger.warning("无法使用浏览器方式获取内容：浏览器模块未加载")
+            return None
+            
+        logger.info(f"尝试使用浏览器获取页面内容: {url}")
+        
+        try:
+            if self.browser is None:
+                # Set Chrome options to make browser less detectable
+                options = uc.ChromeOptions()
+                if not self.use_headless_browser:
+                    # Only run headless if explicitly enabled
+                    options.add_argument('--headless=new')  # Use new headless mode
+                options.add_argument('--no-sandbox')
+                options.add_argument('--disable-dev-shm-usage')
+                options.add_argument('--disable-gpu')
+                options.add_argument('--disable-infobars')
+                options.add_argument('--disable-extensions')
+                options.add_argument('--disable-blink-features=AutomationControlled')
+                options.add_argument('--window-size=1280,720')
+                options.add_experimental_option("excludeSwitches", ["enable-automation"])
+                options.add_experimental_option('useAutomationExtension', False)
+                
+                # 创建临时用户数据目录，以便隔离缓存和Cookie
+                user_dir = NamedTemporaryFile().name
+                options.add_argument(f'--user-data-dir={user_dir}')
+                
+                # 初始化浏览器
+                logger.info("初始化浏览器...")
+                # Set up stealth parameters
+                self.browser = uc.Chrome(options=options)
+                self.browser.set_page_load_timeout(60)
+                self.browser.implicitly_wait(10)
+                
+                # Execute stealth scripts to avoid detection
+                self.browser.execute_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                )
+                self.browser.execute_cdp_cmd(
+                    'Network.setUserAgentOverride',
+                    {'userAgent': random.choice(self.user_agents)}
+                )
+                logger.info("浏览器初始化完成，启用了反检测功能")
+            
+            # 访问页面
+            logger.info(f"浏览器正在打开: {url}")
+            self.browser.get(url)
+            
+            # 等待页面加载
+            try:
+                # 等待页面主体元素加载完成
+                WebDriverWait(self.browser, wait_time).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+                )
+                
+                # 额外等待，确保动态内容加载
+                time.sleep(5)
+                
+                # 获取页面源代码
+                page_source = self.browser.page_source
+                
+                # 检查是否仍然有验证码
+                if "recaptcha" in page_source.lower() or "please show you're not a robot" in page_source.lower():
+                    if self.captcha_service_api_key:
+                        logger.info("尝试使用2Captcha服务解决验证码...")
+                        solved = self._solve_captcha_with_service()
+                        if solved:
+                            logger.info("验证码已解决，重新加载页面...")
+                            self.browser.refresh()
+                            time.sleep(5)
+                            page_source = self.browser.page_source
+                        else:
+                            logger.warning("2Captcha服务无法解决验证码")
+                    else:
+                        logger.warning("浏览器方式仍然遇到了验证码，且未配置CAPTCHA服务")
+                        # 保存截图以供调试
+                        screenshot_path = f"browser_captcha_{int(time.time())}.png"
+                        self.browser.save_screenshot(screenshot_path)
+                        logger.info(f"已保存浏览器截图: {screenshot_path}")
+                        return None
+                
+                logger.info("浏览器成功获取页面内容")
+                return page_source
+                
+            except TimeoutException:
+                logger.error(f"等待页面元素超时: {url}")
+                return None
+                
+        except WebDriverException as e:
+            logger.error(f"浏览器遇到错误: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"使用浏览器获取内容时发生未知错误: {e}")
+            logger.error(traceback.format_exc())
+            return None
+    
+    def _close_browser(self):
+        """关闭浏览器实例"""
+        if self.browser is not None:
+            try:
+                logger.info("正在关闭浏览器...")
+                self.browser.quit()
+                self.browser = None
+                logger.info("浏览器已关闭")
+            except Exception as e:
+                logger.error(f"关闭浏览器时发生错误: {e}")
+    
+    def _solve_captcha_with_service(self) -> bool:
+        """使用2Captcha服务解决验证码"""
+        try:
+            from twocaptcha import TwoCaptcha
+            
+            # 如果使用代理，配置2Captcha使用相同代理
+            solver_config = {'apiKey': self.captcha_service_api_key}
+            if self.current_proxy:
+                solver_config['defaultTimeout'] = 120
+                solver_config['recaptchaTimeout'] = 600
+                solver_config['pollingInterval'] = 10
+                
+                if self.current_proxy.startswith('http'):
+                    solver_config['proxy'] = {
+                        'type': 'HTTP',
+                        'uri': self.current_proxy
+                    }
+                else:
+                    solver_config['proxy'] = {
+                        'type': 'SOCKS5',
+                        'uri': self.current_proxy
+                    }
+            
+            solver = TwoCaptcha(**solver_config)
+            
+            if not self.captcha_service_api_key:
+                logger.warning("未配置2Captcha API密钥，无法使用验证码解决服务")
+                return False
+                
+            # 提取reCAPTCHA sitekey
+            sitekey = self.browser.find_element(By.CSS_SELECTOR, '[data-sitekey]').get_attribute('data-sitekey')
+            if not sitekey:
+                logger.error("无法在页面上找到reCAPTCHA sitekey")
+                return False
+                
+            # 获取当前URL
+            page_url = self.browser.current_url
+            
+            # 创建2Captcha求解器
+            solver = TwoCaptcha(self.captcha_service_api_key)
+            
+            try:
+                logger.info("正在向2Captcha发送验证码求解请求...")
+                result = solver.recaptcha(sitekey, page_url)
+                logger.info(f"2Captcha返回结果: {result}")
+                
+                # 将解决方案注入页面
+                self.browser.execute_script(
+                    f"document.getElementById('g-recaptcha-response').innerHTML = '{result['code']}';"
+                )
+                time.sleep(1)
+                
+                # 提交验证码表单
+                submit_button = self.browser.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+                submit_button.click()
+                time.sleep(5)
+                
+                logger.info("验证码解决方案已提交")
+                return True
+                
+            except Exception as e:
+                logger.error(f"2Captcha服务错误: {e}")
+                return False
+                
+        except ImportError:
+            logger.error("未安装2Captcha Python库，请运行: pip install 2captcha-python")
+            return False
+        except Exception as e:
+            logger.error(f"解决验证码时出错: {e}")
+            return False
+            
+    def __del__(self):
+        """析构函数，确保释放浏览器资源"""
+        self._close_browser()
 
 def print_citation_tree(node: CitationNode, indent: str = ""):
     """打印引用树"""
