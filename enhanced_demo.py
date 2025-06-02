@@ -131,13 +131,19 @@ def setup_enhanced_argument_parser():
     parser.add_argument(
         '--skip-429',
         action='store_true',
-        help='遇到429错误时直接跳过，不进行任何修复和重试（极速模式）'
+        help='遇到429错误时执行所有自动化策略，但跳过浏览器手动处理（智能跳过模式）'
     )
     
     parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='详细输出'
+    )
+    
+    parser.add_argument(
+        '--debug-skip-mode',
+        action='store_true',
+        help='调试用：加速测试流程中的跳过模式'
     )
     
     return parser
