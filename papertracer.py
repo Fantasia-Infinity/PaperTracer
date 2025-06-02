@@ -59,7 +59,7 @@ class GoogleScholarCrawler:
     """Google Scholar 爬虫类"""
     
     def __init__(self, max_depth=3, max_papers_per_level=10, delay_range=(2, 5), max_captcha_retries=3,
-                 use_browser_fallback=True, captcha_service_api_key=None, proxy_list=None):
+                 use_browser_fallback=True, captcha_service_api_key=None, proxy_list=None, skip_429_errors=False):
         self.max_depth = max_depth
         self.max_papers_per_level = max_papers_per_level
         self.delay_range = delay_range
@@ -68,7 +68,9 @@ class GoogleScholarCrawler:
         self.use_headless_browser = True  # 添加缺失的属性
         self.captcha_service_api_key = captcha_service_api_key
         self.proxy_list = proxy_list or []
+        self.skip_429_errors = skip_429_errors  # 新增: 是否跳过429错误
         self.proxy_index = 0
+        self.current_proxy = self.proxy_list[0] if self.proxy_list else None
         self.visited_urls: Set[str] = set()
         self.session = requests.Session()
         self.user_agents = [
@@ -285,7 +287,14 @@ class GoogleScholarCrawler:
                 
                 # 特殊处理429错误 - Too Many Requests
                 if "429" in error_msg or "Too Many Requests" in error_msg:
-                    self._handle_429_error()
+                    result = self._handle_429_error(cited_by_url)
+                    if result:  # 如果手动验证成功，使用返回的页面内容
+                        soup = BeautifulSoup(result, 'html.parser')
+                        # 继续正常的页面解析流程
+                        break  # 跳出异常处理循环，使用获得的页面内容
+                    else:
+                        # 手动验证失败，继续原有逻辑
+                        pass
                 else:
                     # 成功请求，重置429跟踪
                     self._reset_429_tracking()
@@ -410,7 +419,14 @@ class GoogleScholarCrawler:
                 
                 # 特殊处理429错误 - Too Many Requests
                 if "429" in error_msg or "Too Many Requests" in error_msg:
-                    self._handle_429_error()
+                    result = self._handle_429_error(scholar_url)
+                    if result:  # 如果手动验证成功，使用返回的页面内容
+                        soup = BeautifulSoup(result, 'html.parser')
+                        # 继续正常的页面解析流程
+                        break  # 跳出异常处理循环，使用获得的页面内容
+                    else:
+                        # 手动验证失败，继续原有逻辑
+                        pass
                 else:
                     # 成功请求，重置429跟踪
                     self._reset_429_tracking()
@@ -611,6 +627,305 @@ class GoogleScholarCrawler:
                 
         return False
     
+    def _fetch_with_browser(self, url: str) -> Optional[str]:
+        """使用浏览器获取页面内容，可处理CAPTCHA"""
+        if not BROWSER_AVAILABLE:
+            logger.error("浏览器模块不可用，无法使用浏览器方式")
+            return None
+        
+        try:
+            # 初始化浏览器（如果还没有）
+            if not self.browser:
+                self._init_browser()
+            
+            if not self.browser:
+                logger.error("浏览器初始化失败")
+                return None
+            
+            logger.info(f"使用浏览器访问: {url}")
+            self.browser.get(url)
+            
+            # 等待页面加载
+            time.sleep(3)
+            
+            # 检查是否遇到CAPTCHA或429错误
+            page_source = self.browser.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # 检查429错误或CAPTCHA
+            page_text = soup.get_text().lower()
+            if ('429' in page_text or 'too many requests' in page_text or 
+                'unusual traffic' in page_text or 'sorry' in soup.title.string.lower() if soup.title else False):
+                logger.warning("检测到429错误页面，切换到手动处理模式")
+                return self._handle_manual_captcha(url)
+            
+            if self._is_captcha_page(soup):
+                logger.warning("检测到CAPTCHA页面，需要人工处理")
+                return self._handle_manual_captcha(url)
+            
+            return page_source
+            
+        except Exception as e:
+            logger.error(f"浏览器访问失败: {e}")
+            return None
+    
+    def _init_browser(self):
+        """初始化无头浏览器"""
+        try:
+            if not BROWSER_AVAILABLE:
+                logger.error("浏览器依赖不可用")
+                return
+                
+            options = uc.ChromeOptions()
+            
+            # 根据配置决定是否使用无头模式
+            if self.use_headless_browser:
+                options.add_argument('--headless')
+            
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            
+            # 兼容性修复：只在支持的Chrome版本中使用excludeSwitches
+            try:
+                options.add_experimental_option("excludeSwitches", ["enable-automation"])
+                options.add_experimental_option('useAutomationExtension', False)
+            except Exception as ex_e:
+                logger.warning(f"跳过excludeSwitches选项 (兼容性问题): {ex_e}")
+                # 使用替代方法
+                options.add_argument('--disable-automation')
+                options.add_argument('--disable-extensions')
+            
+            # 设置代理（如果有）
+            if self.current_proxy:
+                if self.current_proxy.startswith('http'):
+                    options.add_argument(f'--proxy-server={self.current_proxy}')
+                else:
+                    options.add_argument(f'--proxy-server=socks5://{self.current_proxy}')
+            
+            # 尝试使用兼容的Chrome驱动初始化
+            try:
+                self.browser = uc.Chrome(options=options, version_main=None)
+            except Exception as chrome_e:
+                logger.warning(f"标准Chrome初始化失败，尝试简化配置: {chrome_e}")
+                # 简化选项重试
+                simple_options = uc.ChromeOptions()
+                if self.use_headless_browser:
+                    simple_options.add_argument('--headless')
+                simple_options.add_argument('--no-sandbox')
+                simple_options.add_argument('--disable-dev-shm-usage')
+                self.browser = uc.Chrome(options=simple_options)
+            
+            # 只在浏览器成功初始化后执行脚本
+            if self.browser:
+                try:
+                    self.browser.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                except Exception as script_e:
+                    logger.warning(f"执行反检测脚本失败: {script_e}")
+            
+            logger.info("浏览器初始化成功")
+            
+        except Exception as e:
+            logger.error(f"浏览器初始化失败: {e}")
+            self.browser = None
+    
+    def _handle_manual_captcha(self, url: str) -> Optional[str]:
+        """处理需要人工解决的CAPTCHA"""
+        logger.info("=" * 60)
+        logger.info("🤖 检测到CAPTCHA或429错误，需要人工处理")
+        logger.info("=" * 60)
+        logger.info(f"请在浏览器中手动完成CAPTCHA验证")
+        logger.info(f"页面URL: {url}")
+        
+        # 强制切换到有头模式
+        original_headless = self.use_headless_browser
+        self.use_headless_browser = False
+        
+        try:
+            # 关闭现有浏览器（如果有）
+            if self.browser:
+                try:
+                    self.browser.quit()
+                except:
+                    pass
+                self.browser = None
+            
+            # 重新初始化为有头模式
+            self._init_browser()
+            
+            if not self.browser:
+                logger.error("无法初始化浏览器进行手动CAPTCHA处理")
+                return None
+            
+            # 导航到页面
+            logger.info("🌐 正在打开浏览器窗口...")
+            self.browser.get(url)
+            
+            # 等待页面加载
+            time.sleep(3)
+            
+            logger.info("🎯 浏览器窗口已打开！")
+            logger.info("请在浏览器中：")
+            logger.info("1. 完成任何CAPTCHA验证")
+            logger.info("2. 等待页面正常加载")
+            logger.info("3. 如果遇到403/429错误页面，请刷新页面直到正常")
+            logger.info("4. ⚠️  请不要关闭浏览器窗口！")
+            logger.info("5. 完成后，请回到终端按回车键继续...")
+            logger.info("=" * 60)
+            
+            input("\n⏳ 请完成浏览器中的验证，然后按回车键继续...")
+            
+            # 获取当前页面内容
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"🔄 正在获取页面内容 (尝试 {attempt + 1}/{max_retries})...")
+                    
+                    # 检查浏览器窗口是否还存在
+                    try:
+                        window_handles = self.browser.window_handles
+                        if not window_handles:
+                            logger.warning("⚠️  浏览器窗口已关闭")
+                            retry_choice = input("浏览器窗口已关闭，是否重新打开？(y/n): ").lower().strip()
+                            if retry_choice == 'y':
+                                return self._handle_manual_captcha(url)
+                            else:
+                                return None
+                    except Exception as e:
+                        logger.warning(f"⚠️  无法检查浏览器状态: {e}")
+                        retry_choice = input("浏览器连接异常，是否重新打开？(y/n): ").lower().strip()
+                        if retry_choice == 'y':
+                            return self._handle_manual_captcha(url)
+                        else:
+                            return None
+                    
+                    # 等待页面完全加载
+                    time.sleep(3)
+                    
+                    # 获取当前URL
+                    current_url = self.browser.current_url
+                    logger.info(f"📍 当前页面URL: {current_url}")
+                    
+                    # 检查页面是否还在加载
+                    page_state = self.browser.execute_script("return document.readyState")
+                    logger.info(f"📄 页面状态: {page_state}")
+                    
+                    if page_state != "complete":
+                        logger.info("⏳ 页面仍在加载，等待...")
+                        time.sleep(5)
+                    
+                    # 获取页面源码
+                    page_source = self.browser.page_source
+                    
+                    # 检查页面源码长度
+                    page_length = len(page_source) if page_source else 0
+                    logger.info(f"📏 页面内容长度: {page_length} 字符")
+                    
+                    if not page_source or page_length < 100:
+                        logger.warning(f"⚠️  页面内容太短或为空 (长度: {page_length})")
+                        if attempt < max_retries - 1:
+                            logger.info("🔄 将重新尝试获取...")
+                            continue
+                        else:
+                            retry = input("页面内容异常，是否手动重试？(y/n): ").lower().strip()
+                            if retry == 'y':
+                                return self._handle_manual_captcha(url)
+                            else:
+                                return None
+                    
+                    # 解析页面内容
+                    soup = BeautifulSoup(page_source, 'html.parser')
+                    page_text = soup.get_text().lower() if soup else ""
+                    
+                    # 输出页面调试信息
+                    page_title = soup.title.string if soup.title else "无标题"
+                    logger.info(f"📰 页面标题: {page_title}")
+                    
+                    # 检查是否包含Scholar内容
+                    has_scholar_content = (
+                        "scholar" in page_text or 
+                        "google scholar" in page_text or
+                        "cited by" in page_text or
+                        "citations" in page_text or
+                        "结果" in page_text or  # 中文版本
+                        "results" in page_text
+                    )
+                    
+                    # 检查是否还有CAPTCHA或错误
+                    has_captcha = self._is_captcha_page(soup)
+                    has_errors = (
+                        "sorry" in page_text or 
+                        "unusual traffic" in page_text or
+                        "too many requests" in page_text or
+                        "403" in page_text or
+                        "forbidden" in page_text
+                    )
+                    
+                    logger.info(f"🔍 页面检查结果:")
+                    logger.info(f"   - 包含Scholar内容: {'是' if has_scholar_content else '否'}")
+                    logger.info(f"   - 检测到CAPTCHA: {'是' if has_captcha else '否'}")
+                    logger.info(f"   - 检测到错误: {'是' if has_errors else '否'}")
+                    
+                    if not has_captcha and not has_errors:
+                        if has_scholar_content:
+                            logger.info("✅ 验证成功！页面已正常加载，包含Scholar内容")
+                            return page_source
+                        else:
+                            # 即使没有明确的Scholar标识，也可能是正常页面
+                            logger.warning("⚠️  未明确检测到Scholar内容，但页面似乎正常")
+                            logger.info("💡 提示：这可能是因为页面内容格式变化或语言设置")
+                            use_anyway = input("是否仍要使用此页面内容？(y/n): ").lower().strip()
+                            if use_anyway == 'y':
+                                logger.info("✅ 用户确认使用页面内容")
+                                return page_source
+                            else:
+                                retry = input("是否重新尝试验证？(y/n): ").lower().strip()
+                                if retry == 'y':
+                                    return self._handle_manual_captcha(url)
+                                else:
+                                    return None
+                    else:
+                        logger.warning("⚠️  页面似乎仍有问题")
+                        if has_captcha:
+                            logger.info("🔍 检测到CAPTCHA，请确保已完成验证")
+                        if has_errors:
+                            logger.info("🔍 检测到错误页面，请刷新页面或等待")
+                        
+                        retry = input("是否重试？(y/n): ").lower().strip()
+                        if retry == 'y':
+                            return self._handle_manual_captcha(url)
+                        else:
+                            return None
+                            
+                except Exception as e:
+                    logger.error(f"获取页面内容失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                    
+                    # 检查是否是浏览器窗口关闭错误
+                    if "no such window" in str(e) or "target window already closed" in str(e):
+                        logger.warning("⚠️  浏览器窗口已被关闭")
+                        retry_choice = input("浏览器窗口已关闭，是否重新打开？(y/n): ").lower().strip()
+                        if retry_choice == 'y':
+                            return self._handle_manual_captcha(url)
+                        else:
+                            return None
+                    
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    else:
+                        return None
+                        
+            # 如果所有尝试都失败
+            logger.error("所有尝试均失败，无法获取页面内容")
+            return None
+                
+        except Exception as e:
+            logger.error(f"手动CAPTCHA处理失败: {e}")
+            return None
+        finally:
+            # 恢复原始无头模式设置
+            self.use_headless_browser = original_headless
+
     def _handle_captcha_or_block(self, url: str, response_text: str, attempt: int) -> bool:
         """处理CAPTCHA或封禁情况"""
         logger.warning(f"检测到CAPTCHA或访问被阻止: {url} (尝试 #{attempt+1})")
@@ -638,11 +953,11 @@ class GoogleScholarCrawler:
         """自适应延迟策略 - 增强版，更好地应对Google Scholar反爬虫"""
         self.request_count += 1
         
-        # 检查是否最近遇到了429错误
+        # 检查是否最近遇到了429错误 - 缩短监控窗口以更快恢复
         delay_multiplier = 1.0
         if self.last_429_time:
             time_since_429 = datetime.now() - self.last_429_time
-            if time_since_429.total_seconds() < 300:  # 5分钟内
+            if time_since_429.total_seconds() < 60:  # 1分钟内
                 delay_multiplier = 2.0 + self.consecutive_429_count * 0.5
                 logger.info(f"最近遇到429错误，增加延迟倍数: {delay_multiplier:.1f}")
         
@@ -668,25 +983,36 @@ class GoogleScholarCrawler:
             base_delay *= random.uniform(3, 6)
             logger.info(f"使用特别长的延迟以降低被检测概率: {base_delay:.1f} 秒")
         
-        # 限制最大延迟时间，避免过度等待
-        base_delay = min(base_delay, 300)  # 最多5分钟
+        # 限制最大延迟时间，避免过度等待 - 减少到60秒以支持手动CAPTCHA处理
+        base_delay = min(base_delay, 60)  # 最多60秒
         
         logger.debug(f"延迟 {base_delay:.1f} 秒 (请求次数: {self.request_count})")
         time.sleep(base_delay)
 
-    def _handle_429_error(self):
-        """专门处理429错误的方法"""
+    def _handle_429_error(self, url: str = None):
+        """立即触发手动浏览器干预处理429错误"""
         self.last_429_time = datetime.now()
         self.consecutive_429_count += 1
         
-        # 指数退避，但有上限
-        backoff_delay = min(30 * (2 ** min(self.consecutive_429_count, 5)), 600)  # 最多10分钟
-        logger.warning(f"遇到429错误 (连续第{self.consecutive_429_count}次)，等待 {backoff_delay} 秒...")
+        logger.warning("🚨 检测到429错误 (Too Many Requests)")
+        
+        # 如果启用了429跳过模式，直接跳过不进行任何处理
+        if self.skip_429_errors:
+            logger.info("⏭️  429跳过模式已启用，直接跳过此URL")
+            return None
+        
+        logger.warning("🔄 立即切换到手动浏览器模式进行处理...")
         
         # 更新User-Agent
         self._update_headers()
         
-        time.sleep(backoff_delay)
+        # 立即触发手动浏览器干预，不进行延迟等待
+        if url:
+            logger.info("🌐 正在打开浏览器进行手动验证...")
+            return self._handle_manual_captcha(url)
+        else:
+            logger.warning("⚠️  没有提供URL，无法打开浏览器")
+            return None
 
     def _reset_429_tracking(self):
         """重置429错误跟踪"""

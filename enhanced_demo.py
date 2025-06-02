@@ -29,6 +29,7 @@ def setup_enhanced_argument_parser():
   python enhanced_demo.py --url "https://scholar.google.com/..."
   python enhanced_demo.py --resume session_20240602_123456
   python enhanced_demo.py --config production --save-session
+  python enhanced_demo.py --manual-captcha --no-delays
         """
     )
     
@@ -116,6 +117,24 @@ def setup_enhanced_argument_parser():
     )
     
     parser.add_argument(
+        '--manual-captcha',
+        action='store_true',
+        help='启用手动CAPTCHA处理模式（禁用无头浏览器）'
+    )
+    
+    parser.add_argument(
+        '--no-delays',
+        action='store_true',
+        help='禁用所有延迟策略（谨慎使用，可能导致更多429错误）'
+    )
+    
+    parser.add_argument(
+        '--skip-429',
+        action='store_true',
+        help='遇到429错误时直接跳过，不进行任何修复和重试（极速模式）'
+    )
+    
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='详细输出'
@@ -143,6 +162,13 @@ def get_enhanced_config(config_name, args):
     if args.aggressive_delays:
         current_min, current_max = config['delay_range']
         config['delay_range'] = (current_min * 1.5, current_max * 2.0)
+    
+    # 如果禁用延迟策略，设置极小的延迟
+    if args.no_delays:
+        from logger import get_logger
+        logger = get_logger()
+        config['delay_range'] = (0.1, 0.3)
+        logger.warning("⚠️  延迟策略已禁用，这可能导致更多429错误！")
     
     return config
 
@@ -215,17 +241,30 @@ def run_enhanced_demo():
         logger.info(f"   - CAPTCHA重试次数: {args.captcha_retries}")
         logger.info(f"   - 浏览器fallback: {'禁用' if args.no_browser else '启用'}")
         logger.info(f"   - 激进延迟策略: {'启用' if args.aggressive_delays else '禁用'}")
+        logger.info(f"   - 延迟策略: {'禁用' if args.no_delays else '启用'}")
+        logger.info(f"   - 手动CAPTCHA模式: {'启用' if args.manual_captcha else '禁用'}")
+        logger.info(f"   - 429跳过模式: {'启用' if args.skip_429 else '禁用'}")
         logger.info(f"   - 会话保存间隔: {args.session_interval} 请求")
         
         # 创建增强爬虫实例
         logger.info("🚀 初始化增强爬虫...")
+        
+        # 设置无头浏览器模式（如果启用手动CAPTCHA，则使用有头模式）
+        use_headless = not args.manual_captcha
+        
         crawler = GoogleScholarCrawler(
             max_depth=config['max_depth'],
             max_papers_per_level=config['max_papers_per_level'],
             delay_range=config['delay_range'],
             max_captcha_retries=args.captcha_retries,
-            use_browser_fallback=not args.no_browser
+            use_browser_fallback=not args.no_browser,
+            skip_429_errors=args.skip_429
         )
+        
+        # 如果启用手动CAPTCHA模式，设置浏览器为有头模式
+        if args.manual_captcha:
+            crawler.use_headless_browser = False
+            logger.info("🎯 手动CAPTCHA模式已启用，浏览器将以有头模式运行")
         
         # 设置会话管理器
         session_manager = None
@@ -410,3 +449,10 @@ def run_enhanced_demo():
 if __name__ == "__main__":
     success = run_enhanced_demo()
     sys.exit(0 if success else 1)
+
+'''
+python /Users/shufanzhang/Documents/coderepos/papertracer/enhanced_demo.py --url "https://scholar.google.com/scholar?cites=10749086880817846297&as_sdt=2005&sciodt=0,5&hl=en" --config demo --depth 5 --max-papers 10 --manual-captcha --no-delays
+
+# 使用429跳过模式的示例（极速模式，跳过所有429错误）:
+python /Users/shufanzhang/Documents/coderepos/papertracer/enhanced_demo.py --url "https://scholar.google.com/scholar?cites=10749086880817846297&as_sdt=2005&sciodt=0,5&hl=en" --config demo --depth 3 --max-papers 5 --skip-429 --no-delays
+'''

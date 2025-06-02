@@ -29,14 +29,17 @@ pip install -r requirements.txt
 
 ```bash
 # 运行完整演示（推荐首次使用）
-python demo.py
+python enhanced_demo.py
 
 # 查看帮助信息
-python demo.py --help
+python enhanced_demo.py --help
 
 # 使用不同配置
-python demo.py --config production --depth 3
-python demo.py --config quick --no-visualization
+python enhanced_demo.py --config production --depth 3
+python enhanced_demo.py --config quick --no-visualization
+
+# 手动CAPTCHA模式
+python enhanced_demo.py --manual-captcha --depth 2 --max-papers 5
 ```
 
 ### 3. 基本用法

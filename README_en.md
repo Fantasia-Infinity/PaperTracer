@@ -29,14 +29,17 @@ pip install -r requirements.txt
 
 ```bash
 # Run full demo (recommended for first use)
-python demo.py
+python enhanced_demo.py
 
 # View help information
-python demo.py --help
+python enhanced_demo.py --help
 
 # Use different configurations
-python demo.py --config production --depth 3
-python demo.py --config quick --no-visualization
+python enhanced_demo.py --config production --depth 3
+python enhanced_demo.py --config quick --no-visualization
+
+# Manual CAPTCHA mode
+python enhanced_demo.py --manual-captcha --depth 2 --max-papers 5
 ```
 
 ### 3. Basic Usage

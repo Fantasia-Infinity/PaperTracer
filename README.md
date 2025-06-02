@@ -23,6 +23,7 @@ PaperTracer is a powerful Google Scholar citation crawler that recursively crawl
 - 🛡️ **Anti-Crawler Protection**: Built-in random delay and User-Agent rotation mechanisms.
 - ⚙️ **Flexible Configuration**: Customizable crawl depth, number of papers per level, etc.
 - 📈 **Detailed Statistics**: Provides detailed statistics of crawl results.
+- ⚡ **Fast Skip Mode**: New `--skip-429` option to skip 429 errors for ultra-fast crawling
 
 ## 🚀 New Enhanced Features (v2.0)
 
@@ -33,7 +34,7 @@ PaperTracer is a powerful Google Scholar citation crawler that recursively crawl
 - ⚡ **Enhanced Demo Script**: Comprehensive CLI with session recovery capabilities
 - 🛠️ **Chrome Driver Compatibility**: Improved browser fallback mechanisms
 
-📖 **[View Detailed Enhanced Features Guide →](ENHANCED_FEATURES.md)**
+📖 **[View Detailed Features & Changelog →](FEATURES_AND_CHANGELOG.md)**
 
 ## 🚀 Quick Start
 
@@ -82,15 +83,18 @@ python session_manager.py export session_id --format csv
 python performance_monitor.py --session-dir output/my_session --interval 2
 ```
 
-### 5. Original Demo (Still Available)
+### 5. Quick Commands
 
 ```bash
-# Run full demo (classic version)
-python demo.py
+# Quick test
+python enhanced_demo.py --config quick --save-session
 
-# Use different configurations
-python demo.py --config production --depth 3
-python demo.py --config quick --no-visualization
+# Production mode
+python enhanced_demo.py --config production --depth 3
+python enhanced_demo.py --config quick --no-visualization
+
+# Manual CAPTCHA mode (replaces quick_manual_demo.py)
+python enhanced_demo.py --manual-captcha --depth 2 --max-papers 5
 ```
 
 ### 3. Basic Usage
