@@ -90,7 +90,7 @@ class GoogleScholarCrawler:
         
         # 设置更完整的请求头
         self._update_headers()
-    
+
     def _get_random_delay(self):
         """获取随机延迟时间（已废弃，使用_adaptive_delay代替）"""
         return random.uniform(*self.delay_range)
@@ -193,6 +193,18 @@ class GoogleScholarCrawler:
             logger.error(f"解析论文信息时出错: {e}")
             return Paper(title="Parse Error", authors="", year="")
     
+    def _make_request(self, url: str, timeout: int = 20) -> Optional[requests.Response]:
+        """统一的请求方法，自动选择ScrapingAnt代理池或常规请求"""
+        # 常规请求方法
+        self._adaptive_delay()
+        
+        if self.request_count % 5 == 0:
+            self._update_headers()
+        
+        response = self.session.get(url, timeout=timeout)
+        response.raise_for_status()
+        return response
+
     def _fetch_citations(self, cited_by_url: str) -> List[Paper]:
         """获取引用该论文的文章列表"""
         if not cited_by_url or cited_by_url in self.visited_urls:
@@ -292,7 +304,11 @@ class GoogleScholarCrawler:
                     if paper.title != "Parse Error" and paper.title != "Unknown Title":
                         papers.append(paper)
                 
-                logger.info(f"找到 {len(papers)} 篇有效引用论文 from {cited_by_url}")
+                # 按引用次数排序（降序），引用次数高的论文优先
+                papers.sort(key=lambda p: p.citation_count, reverse=True)
+                logger.info(f"找到 {len(papers)} 篇有效引用论文，已按引用量排序 from {cited_by_url}")
+                if papers:
+                    logger.info(f"引用量范围: {papers[0].citation_count} 到 {papers[-1].citation_count}")
                 
                 # 成功请求，重置429跟踪
                 self._reset_429_tracking()
@@ -555,10 +571,10 @@ class GoogleScholarCrawler:
         # 创建根节点
         root_node = CitationNode(paper=root_paper, children=[], depth=current_depth)
         
-        # 获取引用这篇论文的文章
+        # 获取引用这篇论文的文章（已在_fetch_citations中按引用量排序）
         citing_papers = self._fetch_citations(root_paper.cited_by_url)
         
-        # 为每个引用论文递归构建子树
+        # 为每个引用论文递归构建子树（论文已按引用量降序排列）
         for citing_paper in citing_papers:
             if citing_paper.cited_by_url and current_depth + 1 < self.max_depth:
                 child_node = self._build_citation_subtree(citing_paper, current_depth + 1)
@@ -578,10 +594,10 @@ class GoogleScholarCrawler:
         
         node = CitationNode(paper=paper, children=[], depth=depth)
         
-        # 获取引用这篇论文的文章
+        # 获取引用这篇论文的文章（已在_fetch_citations中按引用量排序）
         citing_papers = self._fetch_citations(paper.cited_by_url)
         
-        # 为每个引用论文递归构建子树
+        # 为每个引用论文递归构建子树（论文已按引用量降序排列）
         for citing_paper in citing_papers:
             if citing_paper.cited_by_url and depth + 1 < self.max_depth:
                 child_node = self._build_citation_subtree(citing_paper, depth + 1)
@@ -980,224 +996,185 @@ class GoogleScholarCrawler:
                             return self._handle_manual_captcha(url)
                         else:
                             return None
-                            
+                    
                 except Exception as e:
-                    logger.error(f"获取页面内容失败 (尝试 {attempt + 1}/{max_retries}): {e}")
-                    
-                    # 检查是否是浏览器窗口关闭错误
-                    if "no such window" in str(e) or "target window already closed" in str(e):
-                        logger.warning("⚠️  浏览器窗口已被关闭")
-                        retry_choice = input("浏览器窗口已关闭，是否重新打开？(y/n): ").lower().strip()
-                        if retry_choice == 'y':
-                            return self._handle_manual_captcha(url)
-                        else:
-                            return None
-                    
+                    logger.error(f"获取页面内容时出错: {e}")
                     if attempt < max_retries - 1:
+                        logger.info("🔄 将重新尝试...")
                         time.sleep(2)
                         continue
                     else:
-                        return None
-                        
-            # 如果所有尝试都失败
-            logger.error("所有尝试均失败，无法获取页面内容")
+                        retry = input("获取页面内容失败，是否重新尝试？(y/n): ").lower().strip()
+                        if retry == 'y':
+                            return self._handle_manual_captcha(url)
+                        else:
+                            return None
+            
+            logger.error("无法获取有效的页面内容")
             return None
-                
-        except Exception as e:
-            logger.error(f"手动CAPTCHA处理失败: {e}")
-            return None
+            
         finally:
-            # 恢复原始无头模式设置
+            # 恢复原始的无头模式设置
             self.use_headless_browser = original_headless
-
-    def _handle_captcha_or_block(self, url: str, response_text: str, attempt: int) -> bool:
-        """处理CAPTCHA或封禁情况"""
-        logger.warning(f"检测到CAPTCHA或访问被阻止: {url} (尝试 #{attempt+1})")
+    
+    def _handle_captcha_or_block(self, url: str, response_text: str, attempt: int):
+        """处理CAPTCHA或封禁的通用方法"""
+        logger.warning(f"遇到CAPTCHA或封禁 (尝试 {attempt + 1})")
         
-        # 保存调试信息
-        debug_file = f"debug_captcha_{int(time.time())}.html"
-        with open(debug_file, 'w', encoding='utf-8') as f:
-            f.write(response_text)
-        logger.info(f"已保存调试页面到: {debug_file}")
-        
-        # 轮换代理
-        self._rotate_proxy()
-        
-        # 指数退避延迟
-        delay = random.uniform(10, 20) * (1.5 ** attempt)
-        logger.info(f"遇到CAPTCHA，等待 {delay:.1f} 秒 (指数退避)...")
-        time.sleep(delay)
+        # 轮换代理（如果有）
+        if self.proxy_list:
+            self._rotate_proxy()
+            logger.info("已轮换代理")
         
         # 更新请求头
         self._update_headers()
+        logger.info("已更新请求头")
         
-        return False
+        # 渐进式延迟
+        delay = 5 + attempt * 3 + random.uniform(1, 5)
+        logger.info(f"等待 {delay:.1f} 秒后重试...")
+        time.sleep(delay)
     
     def _adaptive_delay(self):
-        """自适应延迟策略 - 增强版，更好地应对Google Scholar反爬虫"""
+        """自适应延迟策略"""
         self.request_count += 1
         
-        # 检查是否最近遇到了429错误 - 缩短监控窗口以更快恢复
-        delay_multiplier = 1.0
+        # 基础延迟
+        base_delay = random.uniform(*self.delay_range)
+        
+        # 根据请求频率调整延迟
+        if self.request_count % 10 == 0:
+            base_delay *= 1.5  # 每10个请求增加50%延迟
+        
+        # 如果最近遇到过429错误，增加延迟
         if self.last_429_time:
             time_since_429 = datetime.now() - self.last_429_time
-            if time_since_429.total_seconds() < 60:  # 1分钟内
-                delay_multiplier = 2.0 + self.consecutive_429_count * 0.5
-                logger.info(f"最近遇到429错误，增加延迟倍数: {delay_multiplier:.1f}")
+            if time_since_429 < timedelta(minutes=5):
+                base_delay *= 2
         
-        # 基础延迟
-        base_delay = random.uniform(*self.delay_range) * delay_multiplier
-        
-        # 根据请求次数动态增加延迟 - 更激进的策略
-        if self.request_count > 5:
-            base_delay *= 1.3
-        if self.request_count > 10:
-            base_delay *= 1.8
-        if self.request_count > 20:
-            base_delay *= 2.5
-        if self.request_count > 30:
-            base_delay *= 3.0
-        
-        # 增加随机性以避免检测模式
-        if random.random() < 0.2:  # 20%概率使用更长延迟
-            base_delay *= random.uniform(2, 4)
-        
-        # 每隔一段时间使用特别长的延迟
-        if self.request_count % 15 == 0:
-            base_delay *= random.uniform(3, 6)
-            logger.info(f"使用特别长的延迟以降低被检测概率: {base_delay:.1f} 秒")
-        
-        # 限制最大延迟时间，避免过度等待 - 减少到60秒以支持手动CAPTCHA处理
-        base_delay = min(base_delay, 60)  # 最多60秒
-        
-        logger.debug(f"延迟 {base_delay:.1f} 秒 (请求次数: {self.request_count})")
         time.sleep(base_delay)
-
-    def _handle_429_error(self, url: str = None):
-        """处理429错误 - 实现智能跳过策略执行自动化处理但跳过浏览器交互"""
-        self.last_429_time = datetime.now()
+    
+    def _handle_429_error(self, url: str) -> Optional[str]:
+        """处理429错误 - Too Many Requests"""
+        current_time = datetime.now()
+        self.last_429_time = current_time
         self.consecutive_429_count += 1
         
-        logger.warning("🚨 检测到429错误 (Too Many Requests)")
+        logger.warning(f"遇到429错误 (连续第{self.consecutive_429_count}次): {url}")
         
-        # 执行基础的429错误处理策略
-        logger.info("🔄 执行429错误处理策略...")
-        
-        # 1. 更新User-Agent
-        self._update_headers()
-        logger.info("   ✓ 已更新User-Agent")
-        
-        # 2. 执行指数退避延迟
-        delay_time = min(2 ** min(self.consecutive_429_count, 5), 30)  # 最多30秒
-        logger.info(f"   ✓ 执行退避延迟: {delay_time} 秒")
-        time.sleep(delay_time)
-        
-        # 3. 如果连续错误过多，增加额外的休息时间
-        if self.consecutive_429_count > 3:
-            extra_delay = random.uniform(5, 15)
-            logger.info(f"   ✓ 执行额外休息: {extra_delay:.1f} 秒")
-            time.sleep(extra_delay)
-        
-        # 4. 如果启用了429跳过模式，不使用浏览器干预
         if self.skip_429_errors:
-            logger.info("⏭️  429跳过模式已启用，跳过浏览器手动处理")
-            logger.info("   ✓ 已执行所有自动化策略，继续后续处理")
-            # 显式打印确认消息，以便测试脚本可以检测到
-            print("🔄 智能跳过模式：已执行自动化策略，跳过浏览器处理")
-            return None
+            logger.info("⏭️  启用了跳过429错误模式，执行快速策略")
+            
+            # 快速策略：短暂延迟后继续
+            retry_delay = 2 + random.uniform(1, 3)
+            logger.info(f"   ✓ 执行快速延迟: {retry_delay:.1f} 秒")
+            time.sleep(retry_delay)
+            
+            # 更新请求头
+            self._update_headers()
+            logger.info("   ✓ 已更新请求头")
+            
+            logger.info("   ✓ 快速策略完成，继续尝试")
+            return None  # 返回None，让调用方继续尝试
         
-        # 5. 默认模式：使用浏览器手动干预
-        logger.warning("🔄 切换到手动浏览器模式进行处理...")
+        # 默认模式：完整的429处理策略
+        logger.info("🔄 执行完整的429错误处理策略...")
         
-        if url:
-            logger.info("🌐 正在打开浏览器进行手动验证...")
+        # 1. 轮换代理
+        if self.proxy_list:
+            self._rotate_proxy()
+            logger.info("   ✓ 已轮换代理")
+        
+        # 2. 更新请求头
+        self._update_headers()
+        logger.info("   ✓ 已更新请求头")
+        
+        # 3. 计算延迟时间
+        base_delay = 10  # 基础延迟10秒
+        progressive_delay = self.consecutive_429_count * 5  # 渐进式延迟
+        random_delay = random.uniform(5, 15)  # 随机延迟
+        total_delay = base_delay + progressive_delay + random_delay
+        
+        logger.info(f"   ✓ 执行延迟策略: {total_delay:.1f} 秒")
+        logger.info(f"     - 基础延迟: {base_delay}s")
+        logger.info(f"     - 渐进延迟: {progressive_delay}s (连续{self.consecutive_429_count}次)")
+        logger.info(f"     - 随机延迟: {random_delay:.1f}s")
+        
+        time.sleep(total_delay)
+        
+        # 4. 如果连续429错误太多，启用手动验证
+        if self.consecutive_429_count >= 3 and self.use_browser_fallback:
+            logger.warning("连续429错误过多，启用手动验证模式")
             return self._handle_manual_captcha(url)
-        else:
-            logger.warning("⚠️  没有提供URL，无法打开浏览器")
-            return None
-
+        
+        logger.info("   ✓ 429错误处理完成，继续尝试")
+        return None
+    
     def _reset_429_tracking(self):
         """重置429错误跟踪"""
         if self.consecutive_429_count > 0:
-            logger.info(f"成功请求，重置429错误计数 (之前连续{self.consecutive_429_count}次)")
-            self.consecutive_429_count = 0
-            
-    def save_session_state(self, filepath: str):
-        """保存会话状态到文件"""
-        state = {
-            'session_id': self.session_id,
-            'visited_urls': list(self.visited_urls),
-            'request_count': self.request_count,
-            'last_429_time': self.last_429_time,
-            'consecutive_429_count': self.consecutive_429_count,
-            'current_proxy_index': self.proxy_index if hasattr(self, 'proxy_index') else 0
-        }
+            logger.info(f"✅ 成功请求，重置429错误计数 (之前连续{self.consecutive_429_count}次)")
+        self.consecutive_429_count = 0
+        self.last_429_time = None
+    
+    def close(self):
+        """清理资源"""
+        if self.browser:
+            try:
+                self.browser.quit()
+                logger.info("浏览器已关闭")
+            except Exception as e:
+                logger.error(f"关闭浏览器时出错: {e}")
         
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(state, f, indent=2, default=str)
-            logger.info(f"会话状态已保存到: {filepath}")
-        except Exception as e:
-            logger.error(f"保存会话状态失败: {e}")
+        if self.session:
+            self.session.close()
+            logger.info("会话已关闭")
 
-    def load_session_state(self, filepath: str) -> bool:
-        """从文件加载会话状态"""
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                state = json.load(f)
-            
-            self.session_id = state.get('session_id', self.session_id)
-            self.visited_urls = set(state.get('visited_urls', []))
-            self.request_count = state.get('request_count', 0)
-            self.consecutive_429_count = state.get('consecutive_429_count', 0)
-            self.proxy_index = state.get('current_proxy_index', 0)
-            
-            # 处理时间字符串
-            last_429_str = state.get('last_429_time')
-            if last_429_str and last_429_str != 'None':
-                try:
-                    self.last_429_time = datetime.fromisoformat(last_429_str.replace('Z', '+00:00'))
-                except:
-                    self.last_429_time = None
-            
-            logger.info(f"会话状态已从 {filepath} 恢复")
-            logger.info(f"  - 会话ID: {self.session_id}")
-            logger.info(f"  - 已访问URL数: {len(self.visited_urls)}")
-            logger.info(f"  - 请求计数: {self.request_count}")
-            logger.info(f"  - 连续429错误: {self.consecutive_429_count}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"加载会话状态失败: {e}")
-            return False
-def print_citation_tree(node: CitationNode, indent: str = ""):
-    """打印引用树"""
-    print(f"{indent}📄 {node.paper.title}")
-    print(f"{indent}   👥 {node.paper.authors}")
-    if node.paper.year:
-        print(f"{indent}   📅 {node.paper.year}")
-    if node.paper.citation_count > 0:
-        print(f"{indent}   📊 被引用 {node.paper.citation_count} 次")
+def print_citation_tree(node: CitationNode, indent: int = 0, max_title_length: int = 80):
+    """打印引用树的美化版本"""
+    if not node:
+        return
+    
+    prefix = "  " * indent
+    
+    # 截断过长的标题
+    title = node.paper.title
+    if len(title) > max_title_length:
+        title = title[:max_title_length-3] + "..."
+    
+    # 格式化输出
+    citation_info = f"(引用数: {node.paper.citation_count})" if node.paper.citation_count > 0 else ""
+    year_info = f"({node.paper.year})" if node.paper.year else ""
+    
+    print(f"{prefix}├─ {title}")
+    if node.paper.authors:
+        print(f"{prefix}   作者: {node.paper.authors}")
+    if year_info or citation_info:
+        info_line = " ".join(filter(None, [year_info, citation_info]))
+        print(f"{prefix}   {info_line}")
+    if node.paper.url:
+        print(f"{prefix}   链接: {node.paper.url}")
     print()
     
+    # 递归打印子节点
     for child in node.children:
-        print_citation_tree(child, indent + "  ")
+        print_citation_tree(child, indent + 1, max_title_length)
 
 def save_tree_to_json(node: CitationNode, filename: str):
-    """将引用树保存为JSON文件"""
+    """将引用树保存为JSON格式"""
     def node_to_dict(n: CitationNode) -> dict:
         return {
-            "paper": {
-                "title": n.paper.title,
-                "authors": n.paper.authors,
-                "year": n.paper.year,
-                "citation_count": n.paper.citation_count,
-                "url": n.paper.url,
-                "cited_by_url": n.paper.cited_by_url,
-                "abstract": n.paper.abstract
+            'paper': {
+                'title': n.paper.title,
+                'authors': n.paper.authors,
+                'year': n.paper.year,
+                'citation_count': n.paper.citation_count,
+                'url': n.paper.url,
+                'cited_by_url': n.paper.cited_by_url,
+                'abstract': n.paper.abstract
             },
-            "depth": n.depth,
-            "children": [node_to_dict(child) for child in n.children]
+            'depth': n.depth,
+            'children': [node_to_dict(child) for child in n.children]
         }
     
     tree_dict = node_to_dict(node)
@@ -1207,59 +1184,38 @@ def save_tree_to_json(node: CitationNode, filename: str):
     
     logger.info(f"引用树已保存到: {filename}")
 
-# 示例使用
-sample_link = "https://scholar.google.com/scholar?cites=11002616430871081935&as_sdt=2005&sciodt=0,5&hl=en"
+def load_tree_from_json(filename: str) -> CitationNode:
+    """从JSON文件加载引用树"""
+    def dict_to_node(data: dict) -> CitationNode:
+        paper = Paper(**data['paper'])
+        node = CitationNode(paper=paper, children=[], depth=data['depth'])
+        node.children = [dict_to_node(child) for child in data['children']]
+        return node
+    
+    with open(filename, 'r', encoding='utf-8') as f:
+        tree_dict = json.load(f)
+    
+    return dict_to_node(tree_dict)
 
-def main():
-    """主函数"""
+# 使用示例
+if __name__ == "__main__":
+    # 示例使用
     crawler = GoogleScholarCrawler(
-        max_depth=10,  # 最大递归深度
-        max_papers_per_level=30,  # 每层最多爬取的论文数
-        delay_range=(1, 3)  # 请求间隔时间范围（秒）
+        max_depth=2,
+        max_papers_per_level=5,
+        delay_range=(2, 4),
+        skip_429_errors=True  # 启用跳过429错误模式
     )
     
-    # 尝试加载先前的会话
-    session_file = "crawler_session.pkl"
+    # 从引用页面开始爬取
+    start_url = "https://scholar.google.com/scholar?cites=1234567890&as_sdt=2005&sciodt=0,5&hl=en"
+    
     try:
-        crawler.load_session(session_file)
-    except Exception as e:
-        logger.error(f"加载会话时出错，继续执行: {e}")
-    
-    print("🚀 开始构建引用树...")
-    print(f"📋 起始链接: {sample_link}")
-    print(f"📊 最大深度: {crawler.max_depth}")
-    print(f"📈 每层最多论文数: {crawler.max_papers_per_level}")
-    print("-" * 50)
-    
-    # 构建引用树
-    citation_tree = crawler.build_citation_tree(sample_link)
-    
-    if citation_tree:
-        print("\n✅ 引用树构建完成!")
-        print("=" * 50)
-        print_citation_tree(citation_tree)
-        
-        # 保存为JSON文件
-        save_tree_to_json(citation_tree, "citation_tree.json")
-        
-        # 统计信息
-        def count_nodes(node):
-            count = 1
-            for child in node.children:
-                count += count_nodes(child)
-            return count
-        
-        total_papers = count_nodes(citation_tree)
-        print(f"\n📊 统计信息:")
-        print(f"   总论文数: {total_papers}")
-        print(f"   树的深度: {citation_tree.depth}")
-        print(f"   根节点子节点数: {len(citation_tree.children)}")
-        
-        # 保存当前会话
-        crawler.save_session(session_file)
-        
-    else:
-        print("❌ 无法构建引用树")
-
-if __name__ == "__main__":
-    main()
+        tree = crawler.build_citation_tree(start_url)
+        if tree:
+            print_citation_tree(tree)
+            save_tree_to_json(tree, "citation_tree.json")
+        else:
+            print("未能构建引用树")
+    finally:
+        crawler.close()

@@ -460,5 +460,5 @@ if __name__ == "__main__":
 python /Users/shufanzhang/Documents/coderepos/papertracer/enhanced_demo.py --url "https://scholar.google.com/scholar?cites=10749086880817846297&as_sdt=2005&sciodt=0,5&hl=en" --config demo --depth 5 --max-papers 10 --manual-captcha --no-delays
 
 # 使用429跳过模式的示例（极速模式，跳过所有429错误）:
-python /Users/shufanzhang/Documents/coderepos/papertracer/enhanced_demo.py --url "https://scholar.google.com/scholar?cites=10749086880817846297&as_sdt=2005&sciodt=0,5&hl=en" --config demo --depth 3 --max-papers 5 --skip-429 --no-delays
+python /Users/shufanzhang/Documents/coderepos/papertracer/enhanced_demo.py --url "https://scholar.google.com/scholar?start=10&hl=en&as_sdt=2005&sciodt=0,5&cites=11002616430871081935&scipsc=" --config demo --depth 5 --max-papers 20 --skip-429 
 '''
